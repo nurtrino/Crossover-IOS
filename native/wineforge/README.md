@@ -81,14 +81,55 @@ Findings:
    process-lifetime statics). Declared a **non-goal**: the architecture runs
    one server per app session. Revisit only if a concrete need appears.
 
-### Next experiments
+### 002 — real Wine client on the in-thread server (PASSING)
 
-- 002 (reframed): connect the **real** Wine client to the in-thread server.
-  Wine's `WINESERVERSOCKET` path already lets a client use a pre-connected
-  socket instead of forking its own server, and `server_connect()` will use
-  an existing master socket if present — so the genuine ntdll client is a
-  more authentic driver of `init_first_thread` than a hand-rolled protocol
-  mock. Gated on the full Wine build (in progress) + a working prefix.
-- 004: two clients exercising cross-process handle duplication through the
-  one shared in-thread server.
-- Baseline: `wine notepad.exe` end-to-end against the in-thread server (M1).
+`real_client_test` runs the **genuine** `wine` loader against the in-thread
+wineserver. Wine's `server_connect()` connects to the existing master socket
+in the prefix instead of forking its own server, so the real ntdll client
+drives the full protocol — version handshake, `init_first_thread`, the
+request/reply fd dance — against wineserver-as-a-thread. The client runs,
+exits, and the server then **self-shuts-down on its own** once its last user
+process is gone (no signal from the harness) — proof the client registered
+as a genuine user process. Deterministic across repeated runs.
+
+The harness still `fork/exec`s the client (that is the *test* launching a
+client, not Wine spawning a server); eliminating the client's own process is
+the separate client-side workstream below. What 002 nails down is the
+**server side**: the forked `wineserver` process is gone.
+
+### 004 — concurrent real clients, one server (PASSING)
+
+`real_multi_test` launches N real Wine clients at once against one in-thread
+server and measures a hard, server-side number: `init_first_thread`
+handshakes counted from the server's own `-d1` trace. One server multiplexes
+the whole concurrent process tree (the N clients plus every subprocess
+wineboot spawns) and returns to a zero user-process count (clean
+self-shutdown). Client exit codes are reported but secondary — they are
+limited by this minimal, `--without-mingw` prefix, not by the server.
+
+Characterization (this container, 4 cores, TCG-less native x86-64 build):
+
+| clients | init_first_thread handshakes | verdict | wall |
+|--------:|-----------------------------:|:-------:|-----:|
+|       2 |                           42 |  PASS   | 11 s |
+|       4 |                           50 |  PASS   | 12 s |
+|       8 |                           66 |  PASS   | 13 s |
+
+Server multiplexing is not the bottleneck: 4× the clients adds ~2 s of wall
+time, dominated by per-client prefix work, not server contention.
+
+### Server-side of M1 is proven
+
+Experiments 002 + 004 establish that real Wine processes — one or many,
+concurrently — run against `wineserver` running purely as a **thread** in the
+host process, with no forked server anywhere. That is the server half of
+milestone M1.
+
+### Next: client-side process elimination
+
+What remains for full M1 (`wine notepad.exe` with *all* fork/exec compiled
+out) is the client half: load ntdll + the PE loader **in-process** and
+replace Wine's `CreateProcess`→`exec` (`dlls/ntdll/unix/process.c`,
+`loader.c`) with a `pproc_spawn`-style in-address-space launch. Scoped as
+patch series 0002 in `docs/NATIVE_PORT.md`. This is the large, invasive part;
+it is developed host-first on Linux before any iOS cross-compile.

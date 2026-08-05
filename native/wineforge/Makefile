@@ -18,7 +18,11 @@ BUILD := build
 # reproduce the same relative layout for its resources.
 .PHONY: all test clean
 
-all: $(BUILD)/server/embed_test $(BUILD)/server/embed_run_test $(BUILD)/nls
+WINE_LOADER ?= $(abspath $(WINE_BUILD))/loader/wine
+WINESERVER_BIN ?= $(abspath $(WINE_BUILD))/server/wineserver
+
+all: $(BUILD)/server/embed_test $(BUILD)/server/embed_run_test \
+     $(BUILD)/server/real_client_test $(BUILD)/server/real_multi_test $(BUILD)/nls
 
 $(BUILD)/server:
 	mkdir -p $(BUILD)/server
@@ -39,9 +43,24 @@ $(BUILD)/server/embed_test: embed_test.c $(BUILD)/server/main_lib.o $(SERVER_OBJ
 $(BUILD)/server/embed_run_test: embed_run_test.c $(BUILD)/server/main_lib.o $(SERVER_OBJS)
 	$(CC) $(CFLAGS) -o $@ embed_run_test.c $(BUILD)/server/main_lib.o $(SERVER_OBJS) -pthread
 
+# Experiment 002 (reframed): real Wine client against the in-thread server.
+$(BUILD)/server/real_client_test: real_client_test.c $(BUILD)/server/main_lib.o $(SERVER_OBJS)
+	$(CC) $(CFLAGS) -o $@ real_client_test.c $(BUILD)/server/main_lib.o $(SERVER_OBJS) -pthread
+
+# Experiment 004: many concurrent real Wine clients, one in-thread server.
+$(BUILD)/server/real_multi_test: real_multi_test.c $(BUILD)/server/main_lib.o $(SERVER_OBJS)
+	$(CC) $(CFLAGS) -o $@ real_multi_test.c $(BUILD)/server/main_lib.o $(SERVER_OBJS) -pthread
+
 test: all
 	$(BUILD)/server/embed_test
 	$(BUILD)/server/embed_run_test
+
+# Require the full Wine build (loader + ntdll). Not in `test` since they are
+# heavier and environment-sensitive; run explicitly.
+test-real: $(BUILD)/server/real_client_test $(BUILD)/server/real_multi_test $(BUILD)/nls
+	$(BUILD)/server/real_client_test $(WINESERVER_BIN) $(WINE_LOADER) wineboot.exe
+	$(BUILD)/server/real_multi_test $(WINESERVER_BIN) $(WINE_LOADER) 4 wineboot.exe
+	./embedded_server_test.sh
 
 clean:
 	rm -rf $(BUILD)

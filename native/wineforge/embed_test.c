@@ -121,7 +121,8 @@ int main(int argc, char **argv)
 
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     struct sockaddr_un addr = { .sun_family = AF_UNIX };
-    strncpy(addr.sun_path, sock_path, sizeof(addr.sun_path) - 1);
+    if (strlen(sock_path) >= sizeof(addr.sun_path)) { printf("socket path too long\n"); return -1; }
+    memcpy(addr.sun_path, sock_path, strlen(sock_path) + 1);
     if (connect(fd, (struct sockaddr *)&addr, sizeof(addr))) {
         perror("FAIL: connect to wineserver");
         return 1;

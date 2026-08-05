@@ -60,6 +60,37 @@ Attack plan, in dependency order:
    host process = one app + its helpers; isolation between bottles comes from
    iOS itself.
 
+### Status against Blocker 1 (2026-08-05)
+
+The **server side is done and tested on real Wine** (host-first, Linux):
+
+- Steps 1–2 (pseudo-process substrate, wineserver-as-thread) validated with
+  the genuine wine-11.0 server and the genuine ntdll client. See
+  `native/wineforge/` experiments 001–004 and `native/patches/`:
+  - **0001** makes wineserver embeddable (returns instead of `exit()`ing).
+  - **0002** forbids the client from forking a server (embedded-only).
+- A real `wine wineboot.exe` — and 8+ concurrent Wine processes — complete
+  `init_first_thread` against wineserver running as a **thread**, with no
+  forked server. That is milestone M1's server half.
+
+The **client side is the remaining work**, tracked as patch series **0003**
+("`CreateProcess` without exec"). Concrete seam, from this codebase:
+
+- `dlls/ntdll/unix/process.c`: `NtCreateUserProcess` → `exec_process()`
+  (~line 419) currently `fork()`s twice and calls `exec_wineloader()`. Replace
+  with a `pproc_spawn`-style path: create a thread group, map the child PE
+  into the shared address space, and hand it a `socketpair` to the same
+  in-thread wineserver instead of an inherited fd.
+- `dlls/ntdll/unix/loader.c`: `exec_wineloader()` / `exec_wineserver()` are
+  the exec seam; the in-process path builds the child's `TEB`/`PEB` and entry
+  thread instead of exec'ing a loader.
+- The client's `server_connect()` already prefers an existing master socket
+  (proved in 002), and same-address-space peers make SCM_RIGHTS fd passing
+  unnecessary — both *simplify* the in-process path.
+
+0003 is the large, multi-week centerpiece and is done host-first on Linux
+(where a "process" is still a thread in a test host) before any iOS build.
+
 ## Blocker 2 — JIT / W^X
 
 - Runtime codegen (Box64/FEX dynarec, x86 apps' own JITs re-emitted) uses the

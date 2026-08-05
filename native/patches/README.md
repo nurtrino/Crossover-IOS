@@ -50,3 +50,23 @@ host process alive.
 process) is not supported — process-lifetime statics (registry `root_key`,
 `master_socket`, lock fd) would need a full reset. The architecture uses one
 server per app session, so this is deferred unless a concrete need appears.
+
+### 0002-no-fork-embedded-server.patch
+
+Enforces the embedded-server model on the client side. iOS cannot fork/exec,
+so a Wine client must never spawn its own `wineserver` — the server is always
+the in-thread one, and its master socket must already exist.
+
+- `dlls/ntdll/unix/loader.c`: `start_server()` refuses when
+  `WINE_EMBEDDED_SERVER` is set, calling `fatal_error("no embedded wineserver
+  present …")` instead of `exec_wineserver()`. Without the env var, behavior
+  is unchanged (standalone Wine still auto-starts a server).
+
+Validated by `native/wineforge/embedded_server_test.sh`: with the env var set,
+the real client runs normally when the in-thread server is present, and fails
+fast — forking no server — when it is absent.
+
+This is the first client-side patch. The large remaining client-side work
+(loading ntdll + the PE loader in-process and replacing `CreateProcess`→
+`exec_wineloader` with a `pproc_spawn`-style in-address-space launch) is
+scoped as series 0003 in `docs/NATIVE_PORT.md`.

@@ -1,0 +1,23 @@
+diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
+index cb700dd..b00433a 100644
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -602,6 +602,18 @@ void start_server( BOOL debug )
+     char *argv[3];
+     static char debug_flag[] = "-d";
+ 
++    /*
++     * Crossover-IOS fork: on iOS the client cannot fork/exec a wineserver —
++     * the server runs as a thread in the host process and its master socket
++     * must already exist. When WINE_EMBEDDED_SERVER is set, refuse to spawn a
++     * server and fail with intent instead of hitting a confusing exec error.
++     * (In the normal flow the caller only reaches here when no socket was
++     * found, so this turns "no embedded server present" into a clear error.)
++     */
++    if (getenv( "WINE_EMBEDDED_SERVER" ))
++        fatal_error( "no embedded wineserver present "
++                     "(WINE_EMBEDDED_SERVER set; refusing to fork a server)\n" );
++
+     if (!started)
+     {
+         int status;

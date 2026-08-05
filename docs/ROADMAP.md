@@ -29,10 +29,18 @@ Every phase ends with something demonstrable.
       setjmp/longjmp; one long-lived server serves many clients and shuts
       down in-process. Maintained as `native/patches/` series (submodule
       stays pinned). Server *restart* declared a non-goal.
-- [ ] Experiment 002 (reframed): connect the real Wine ntdll client to the
-      in-thread server via `WINESERVERSOCKET` / existing master socket
-- [ ] Build full Wine on Linux; baseline `wine notepad.exe` against the
-      in-thread server (M1)
+- [x] **Experiment 002: real Wine client on the in-thread server** — the
+      genuine `wine` loader completes `init_first_thread` against
+      wineserver-as-a-thread; server self-shuts-down after the client exits
+- [x] **Experiment 004: concurrent real clients** — one in-thread server
+      multiplexes N Wine processes (hard handshake count from `-d1` trace),
+      scales to 8+, clean self-shutdown
+- [x] **Full Wine built on Linux (wine-11.0, loader + 762 DLLs)**
+- [x] **Server side of M1 proven**: real Wine, one or many concurrent
+      processes, no forked wineserver
+- [ ] Client side of M1: in-process ntdll + PE loader, `CreateProcess`→
+      `pproc_spawn` (patch series 0002) — the large remaining piece
+- [ ] M1 complete: `wine notepad.exe` with all fork/exec compiled out
 - [ ] Lower `NtCreateUserProcess` onto `pproc_spawn`; compile out fork/exec
 - [ ] Per-pseudo-process PEB + loader module-list instancing
 - [ ] **M1: `wine notepad.exe` with zero fork/exec, single host process**
