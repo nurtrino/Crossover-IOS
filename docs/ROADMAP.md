@@ -38,8 +38,17 @@ Every phase ends with something demonstrable.
 - [x] **Full Wine built on Linux (wine-11.0, loader + 762 DLLs)**
 - [x] **Server side of M1 proven**: real Wine, one or many concurrent
       processes, no forked wineserver
-- [ ] Client side of M1: in-process ntdll + PE loader, `CreateProcess`→
-      `pproc_spawn` (patch series 0002) — the large remaining piece
+- [x] **Patch 0002: client refuses to fork a server** (embedded-only model),
+      tested both directions
+- Client side of M1 — `CreateProcess` without exec (patch series 0003,
+  design in `docs/DESIGN-0003-inproc-spawn.md`):
+  - [x] **0003a: spawn seam** — `spawn_process` dispatches fork vs in-process
+        backend; default unchanged (no regression), in-process backend wired
+        and reached under `WINE_INPROC_SPAWN` (stub → `STATUS_NOT_IMPLEMENTED`)
+  - [ ] 0003b: per-pseudo-process PEB/TEB + context plumbing
+  - [ ] 0003c: in-address-space child PE mapping + relocation
+  - [ ] 0003d: child `init_first_thread` on the handed socket
+  - [ ] 0003e: end-to-end in-process `CreateProcess` (installer→app)
 - [ ] M1 complete: `wine notepad.exe` with all fork/exec compiled out
 - [ ] Lower `NtCreateUserProcess` onto `pproc_spawn`; compile out fork/exec
 - [ ] Per-pseudo-process PEB + loader module-list instancing

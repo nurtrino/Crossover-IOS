@@ -1,2 +1,3 @@
 0001-embeddable-server-shutdown.patch
 0002-no-fork-embedded-server.patch
+0003-inproc-spawn-seam.patch

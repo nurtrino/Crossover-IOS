@@ -61,6 +61,7 @@ test-real: $(BUILD)/server/real_client_test $(BUILD)/server/real_multi_test $(BU
 	$(BUILD)/server/real_client_test $(WINESERVER_BIN) $(WINE_LOADER) wineboot.exe
 	$(BUILD)/server/real_multi_test $(WINESERVER_BIN) $(WINE_LOADER) 4 wineboot.exe
 	./embedded_server_test.sh
+	./spawn_seam_test.sh
 
 clean:
 	rm -rf $(BUILD)
