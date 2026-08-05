@@ -1,0 +1,18 @@
+# Xcode
+*.xcodeproj/
+!*.xcodeproj/project.pbxproj.keep
+xcuserdata/
+DerivedData/
+build/
+*.ipa
+*.dSYM.zip
+
+# SwiftPM
+.build/
+.swiftpm/
+
+# Guest image build outputs (Phase 3)
+guest/out/
+
+# macOS
+.DS_Store
