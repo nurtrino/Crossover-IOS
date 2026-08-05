@@ -24,11 +24,15 @@ Every phase ends with something demonstrable.
       lifecycle (boot, client accept, host-initiated shutdown) in one
       process via objcopy main-rename + `--wrap=exit`; findings in
       `native/wineforge/README.md`
-- [ ] Experiment 002: pproc client speaks the real request protocol
-      (version handshake, `init_first_thread` → counted user process)
-- [ ] Patch series: replace server `exit()`/`fatal_error()` with embeddable
-      shutdown; re-entrant `wineserver_main`
-- [ ] Build stock Wine ARM64 on Linux; baseline `wine notepad.exe` working
+- [x] **Experiment 003: embeddable server shutdown (source-level patch)** —
+      `wineserver_run()`/`server_exit()` replace the `exit()` funnels via
+      setjmp/longjmp; one long-lived server serves many clients and shuts
+      down in-process. Maintained as `native/patches/` series (submodule
+      stays pinned). Server *restart* declared a non-goal.
+- [ ] Experiment 002 (reframed): connect the real Wine ntdll client to the
+      in-thread server via `WINESERVERSOCKET` / existing master socket
+- [ ] Build full Wine on Linux; baseline `wine notepad.exe` against the
+      in-thread server (M1)
 - [ ] Lower `NtCreateUserProcess` onto `pproc_spawn`; compile out fork/exec
 - [ ] Per-pseudo-process PEB + loader module-list instancing
 - [ ] **M1: `wine notepad.exe` with zero fork/exec, single host process**

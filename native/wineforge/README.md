@@ -55,14 +55,40 @@ Findings that shape the fork (kept current as experiments accumulate):
 5. **Signal handlers are process-global.** Fine for one embedded server;
    inventory needed before Wine's own loader signals join the party.
 
+### 003 — embeddable server shutdown, source-level (PASSING)
+
+Turns the experiment-001 linker hack into a real fork patch
+(`native/patches/0001-embeddable-server-shutdown.patch`). The server gains
+`wineserver_run()` (an entry point that returns instead of `exit()`ing) and
+`server_exit()` (unwinds via `setjmp`/`longjmp` back to `wineserver_run`).
+All runtime shutdown funnels — `close_socket_timeout`, `fatal_error`,
+`sigterm_callback`, signal-init failure — route through `server_exit()`,
+guarded by a `server_embedded` flag so the standalone `wineserver` binary is
+byte-for-byte unchanged.
+
+`embed_run_test` validates the real M1 shape: **one** long-lived
+`wineserver_run()` instance serves multiple sequential clients, then a
+host-side SIGINT drives an orderly shutdown that returns 0 with the master
+socket unlinked and the host process alive.
+
+Findings:
+
+6. **`exit()` bypasses `atexit`.** The `longjmp` shutdown skips the
+   `atexit(socket_cleanup)`, so the embedded path must unlink the master
+   socket itself; `socket_cleanup()` was made idempotent to serve both paths.
+7. **Server restart needs a static-state reset.** A second `wineserver_run()`
+   in the same process aborts in `init_registry` (`root_key` and friends are
+   process-lifetime statics). Declared a **non-goal**: the architecture runs
+   one server per app session. Revisit only if a concrete need appears.
+
 ### Next experiments
 
-- 002: teach the pproc substrate to be the client — speak the real request
-  protocol (version handshake, `init_first_thread`) from a pseudo-process
-  so the server counts a *user process* and the "last process exited"
-  shutdown timer fires naturally.
-- 003: first source patch series under `native/patches/`: replace server
-  `exit()`/`fatal_error()` with an embeddable shutdown callback; make
-  `wineserver_main` re-entrant (static state audit).
-- 004: two pseudo-process clients sharing one server thread — cross-process
-  handle duplication through the real server.
+- 002 (reframed): connect the **real** Wine client to the in-thread server.
+  Wine's `WINESERVERSOCKET` path already lets a client use a pre-connected
+  socket instead of forking its own server, and `server_connect()` will use
+  an existing master socket if present — so the genuine ntdll client is a
+  more authentic driver of `init_first_thread` than a hand-rolled protocol
+  mock. Gated on the full Wine build (in progress) + a working prefix.
+- 004: two clients exercising cross-process handle duplication through the
+  one shared in-thread server.
+- Baseline: `wine notepad.exe` end-to-end against the in-thread server (M1).

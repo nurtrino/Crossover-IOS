@@ -1,0 +1,149 @@
+diff --git a/server/main.c b/server/main.c
+index 46419a0..746e1bc 100644
+--- a/server/main.c
++++ b/server/main.c
+@@ -23,6 +23,7 @@
+ #include <assert.h>
+ #include <ctype.h>
+ #include <fcntl.h>
++#include <setjmp.h>
+ #include <signal.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+@@ -241,7 +242,33 @@ static void init_limits(void)
+ #endif
+ }
+ 
+-int main( int argc, char *argv[] )
++/*
++ * Embeddable-shutdown support (Crossover-IOS fork).
++ *
++ * iOS forbids fork/exec, so wineserver must run in-process (as a thread in
++ * the host app). Its shutdown paths historically funnel through exit(),
++ * which would tear down the whole host. server_exit() lets the runtime
++ * shutdown paths (close_socket_timeout, fatal_error, SIGTERM) unwind back
++ * to wineserver_run() instead, leaving the host process alive.
++ *
++ * When not embedded (the standalone wineserver binary), server_exit() is a
++ * straight exit(), so behavior is byte-for-byte unchanged.
++ */
++static jmp_buf server_exit_jmp;
++static int server_embedded;
++static int server_exit_status;
++
++void server_exit( int status )
++{
++    if (server_embedded)
++    {
++        server_exit_status = status;
++        longjmp( server_exit_jmp, 1 );
++    }
++    exit( status );
++}
++
++static void server_body( int argc, char *argv[] )
+ {
+     setvbuf( stderr, NULL, _IOLBF, 0 );
+     server_argv0 = argv[0];
+@@ -267,5 +294,26 @@ int main( int argc, char *argv[] )
+     init_threading();
+     init_registry();
+     main_loop();
++}
++
++int main( int argc, char *argv[] )
++{
++    server_body( argc, argv );
+     return 0;
+ }
++
++/* Embeddable entry point: run the server, returning its exit status instead
++ * of terminating the process. See server_exit() above. */
++int wineserver_run( int argc, char *argv[] )
++{
++    server_embedded = 1;
++    server_exit_status = 0;
++    if (setjmp( server_exit_jmp ))
++    {
++        server_embedded = 0;
++        return server_exit_status;
++    }
++    server_body( argc, argv );
++    server_embedded = 0;
++    return server_exit_status;
++}
+diff --git a/server/request.c b/server/request.c
+index 432a591..bf9e321 100644
+--- a/server/request.c
++++ b/server/request.c
+@@ -150,7 +150,7 @@ void fatal_error( const char *err, ... )
+     fprintf( stderr, "wineserver: " );
+     vfprintf( stderr, err, args );
+     va_end( args );
+-    exit(1);
++    server_exit(1);
+ }
+ 
+ /* allocate the reply data */
+@@ -572,8 +572,10 @@ static void master_socket_poll_event( struct fd *fd, int event )
+ /* remove the socket upon exit */
+ static void socket_cleanup(void)
+ {
+-    static int do_it_once;
+-    if (!do_it_once++) unlink( server_socket_name );
++    /* Idempotent by construction (unlink of a missing socket is harmless),
++     * so no once-guard: the embeddable shutdown may call this per cycle and
++     * atexit may call it again in the standalone binary. */
++    unlink( server_socket_name );
+ }
+ 
+ /* create a directory and check its permissions */
+@@ -912,7 +914,11 @@ static void close_socket_timeout( void *arg )
+ #ifdef DEBUG_OBJECTS
+     close_objects();  /* shut down everything properly */
+ #endif
+-    exit( 0 );
++    /* When embedded, server_exit() unwinds via longjmp and the atexit
++     * socket_cleanup never runs, leaving a stale socket that breaks the
++     * next wineserver_run(). Unlink it here so restart starts clean. */
++    socket_cleanup();
++    server_exit( 0 );
+ }
+ 
+ /* close the master socket and stop waiting for new clients */
+diff --git a/server/request.h b/server/request.h
+index 13254d9..c7a0039 100644
+--- a/server/request.h
++++ b/server/request.h
+@@ -39,9 +39,11 @@
+ extern void fatal_protocol_error( struct thread *thread,
+                                   const char *err, ... ) __attribute__((format (printf,2,3)));
+ extern void fatal_error( const char *err, ... )  __attribute__((noreturn,format(printf,1,2)));
++extern void server_exit( int status ) __attribute__((noreturn));
+ #else
+ extern void fatal_protocol_error( struct thread *thread, const char *err, ... );
+ extern void fatal_error( const char *err, ... );
++extern void server_exit( int status );
+ #endif
+ 
+ extern const char *get_config_dir(void);
+diff --git a/server/signal.c b/server/signal.c
+index 078951a..91010d0 100644
+--- a/server/signal.c
++++ b/server/signal.c
+@@ -183,7 +183,7 @@ static void sighup_callback(void)
+ static void sigterm_callback(void)
+ {
+     flush_registry();
+-    exit(1);
++    server_exit(1);
+ }
+ 
+ /* SIGINT callback */
+@@ -321,5 +321,5 @@ void init_signals(void)
+ 
+ error:
+     fprintf( stderr, "failed to initialize signal handlers\n" );
+-    exit(1);
++    server_exit(1);
+ }
