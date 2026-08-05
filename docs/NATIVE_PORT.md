@@ -27,12 +27,15 @@ Attack plan, in dependency order:
    per-process context: identity (pid/name/argv), spawn/wait/exit-code
    semantics, and thread affiliation. `pproc_spawn` is the shape
    `CreateProcess` will lower to.
-2. **wineserver as a thread** (`native/pseudoproc/psrv.c` proves the model) —
-   wineserver's wire protocol is socketpair-based and does not care whether
-   the peer is a process or a thread. The fork keeps `server/` largely intact:
-   same request structs, same poll loop, run on a dedicated thread, one
-   socketpair per pseudo-process. The prototype demonstrates concurrent
-   clients and a consistent global handle table in one address space.
+2. **wineserver as a thread** — **validated with real Wine code**
+   (`native/wineforge/` experiment 001): the unmodified wine-11.0 wineserver
+   objects run their complete lifecycle on a pthread — boot, master socket,
+   client accept (a real process object gets created for the peer), and
+   host-initiated shutdown — using only an objcopy main-rename and a linker
+   `--wrap=exit`. The wire protocol needed zero changes; the fork's real
+   work here is replacing the server's `exit()`/`fatal_error()` funnels with
+   a thread-unwind and auditing static state for re-entrancy. (The earlier
+   `psrv.c` mock remains as the model documentation.)
 3. **NTDLL/loader surgery** — the invasive part, in rough order of pain:
    - `NtCreateUserProcess` → pseudo-process spawn; PE image mapped into the
      shared address space, relocated on base-address conflicts (PE supports

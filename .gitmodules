@@ -1,0 +1,3 @@
+[submodule "native/wine"]
+	path = native/wine
+	url = https://github.com/wine-mirror/wine.git

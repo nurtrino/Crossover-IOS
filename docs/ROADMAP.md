@@ -17,10 +17,18 @@ Every phase ends with something demonstrable.
       block, thread-group unwind for NtTerminateProcess semantics
 - [ ] CI on Linux + macOS runners (this code must stay bi-platform)
 
-## Phase 2 — Wine fork bring-up, host-first (WS-B) → M1
-- [ ] Vendor Wine at a pinned release under `native/wine` (fork point)
+## Phase 2 — Wine fork bring-up, host-first (WS-B) → M1 ← in progress
+- [x] Vendor Wine at a pinned release under `native/wine` (submodule, wine-11.0)
+- [x] Build real wineserver from source (minimal configure, `server/*.o`)
+- [x] **Experiment 001: unmodified wineserver runs as a thread** — full
+      lifecycle (boot, client accept, host-initiated shutdown) in one
+      process via objcopy main-rename + `--wrap=exit`; findings in
+      `native/wineforge/README.md`
+- [ ] Experiment 002: pproc client speaks the real request protocol
+      (version handshake, `init_first_thread` → counted user process)
+- [ ] Patch series: replace server `exit()`/`fatal_error()` with embeddable
+      shutdown; re-entrant `wineserver_main`
 - [ ] Build stock Wine ARM64 on Linux; baseline `wine notepad.exe` working
-- [ ] Move wineserver in-process on the pproc/psrv model (same wire protocol)
 - [ ] Lower `NtCreateUserProcess` onto `pproc_spawn`; compile out fork/exec
 - [ ] Per-pseudo-process PEB + loader module-list instancing
 - [ ] **M1: `wine notepad.exe` with zero fork/exec, single host process**
