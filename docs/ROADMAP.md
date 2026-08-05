@@ -1,51 +1,54 @@
-# Roadmap
+# Roadmap — native Wine port
 
-Phases are ordered so that every phase ends with something demonstrable.
+Master plan and rationale: `NATIVE_PORT.md`. Milestones M1–M4 defined there.
+Every phase ends with something demonstrable.
 
-## Phase 1 — Foundation (this repo, now)
-- [x] Feasibility analysis and architecture (docs/)
-- [x] SwiftUI scaffold: bottle model + store, engine protocol, MockEngine,
-      bottle list / create / detail UI
-- [ ] CI: build + unit tests on macOS runner (`xcodegen && xcodebuild test`)
+## Phase 0 — Foundation ✅
+- [x] Feasibility analysis, blocker inventory, distribution decision
+      (sideload-first; App Store explicitly out)
+- [x] SwiftUI bottle-manager scaffold with engine abstraction
 
-**Exit criteria:** app runs on an iPad simulator; you can create, rename,
-"run" (mock), and delete bottles; state survives relaunch.
+## Phase 1 — Pseudo-process substrate (WS-A) ← in progress
+- [x] `native/pseudoproc`: processes-as-threads model — spawn/wait/exit,
+      per-process identity, aux threads, nested spawn; tests passing
+- [x] `psrv`: wineserver-as-thread wire model — per-client socketpairs,
+      poll loop, global handle table; concurrent-client tests passing
+- [ ] Harden: pproc-level TLS slots (PEB carrier), per-process environment
+      block, thread-group unwind for NtTerminateProcess semantics
+- [ ] CI on Linux + macOS runners (this code must stay bi-platform)
 
-## Phase 2 — Embedded emulator
-- [ ] Vendor QEMUKit + QEMU (TCTI build) as SwiftPM/xcframework dependencies
-- [ ] `QEMUTCTIEngine` conforming to `VirtualMachineEngine`
-- [ ] Boot a stock Alpine ARM64 image headless; serial console proof in-app
-- [ ] License audit of every linked component (see FEASIBILITY § Legal)
+## Phase 2 — Wine fork bring-up, host-first (WS-B) → M1
+- [ ] Vendor Wine at a pinned release under `native/wine` (fork point)
+- [ ] Build stock Wine ARM64 on Linux; baseline `wine notepad.exe` working
+- [ ] Move wineserver in-process on the pproc/psrv model (same wire protocol)
+- [ ] Lower `NtCreateUserProcess` onto `pproc_spawn`; compile out fork/exec
+- [ ] Per-pseudo-process PEB + loader module-list instancing
+- [ ] **M1: `wine notepad.exe` with zero fork/exec, single host process**
 
-**Exit criteria:** an iPad (device, not simulator) boots a Linux guest from a
-bottle and shows console output inside the app.
+## Phase 3 — iOS bring-up (WS-C) → M2
+- [ ] Cross-build the fork against the iOS SDK (winelib static libs + dylibs)
+- [ ] 16 KB-page mmap/section-mapping layer; TEB register plumbing
+- [ ] Dev-channel harness (TrollStore/jailbreak) for on-device iteration
+- [ ] Render Wine's display into a `CAMetalLayer` via a UIKit winedrv stub
+- [ ] **M2: notepad.exe on an iPad**
 
-## Phase 3 — The Wine guest
-- [ ] Reproducible guest-image build under `guest/` (Alpine + Wine ARM64EC +
-      Box64, binfmt wiring, kiosk compositor, guest agent)
-- [ ] Bottle manifest → auto-launch of a target `.exe` at boot
-- [ ] First end-to-end win: a real Win32 x86 app (e.g. Notepad++ installer →
-      installed → runs) inside a bottle
+## Phase 4 — x86 translation (WS-D) → M3
+- [ ] Box64 integrated for x86/x86-64 PE code (16 KB-page host support);
+      FEX as A/B comparison
+- [ ] Dual-mapped (RW+RX `vm_remap`) dynarec cache; JIT-enabler runtime probe
+- [ ] DXVK → MoltenVK spike: D3D9/D3D11 sample running end-to-end
+- [ ] **M3: a D3D9-era x86 game runs on-device**
 
-**Exit criteria:** "New bottle → pick installer.exe from Files → app icon
-appears → tap → app runs." The CrossOver moment.
+## Phase 5 — Product (WS-E/F) → M4
+- [ ] Audio (CoreAudio driver), input (touch/Pencil/GameController→XInput)
+- [ ] Bottle UI wired to `NativeWineEngine`; install-from-Files flow
+- [ ] Packaging: IPA, AltStore/SideStore source, JIT-enabler onboarding UX
+- [ ] Rename product (trademark), compat database seeded with tested apps
+- [ ] **M4: sideloadable "pick .exe → tap → play"**
 
-## Phase 4 — Display, input, polish
-- [ ] Metal-backed guest display in `RunningAppView` (replace serial console)
-- [ ] Touch/Pencil/keyboard mapping; clipboard sync via guest agent
-- [ ] Post-install snapshots; "Reset bottle"; bottle export/import
-- [ ] Performance passes: TCTI tuning, guest boot-time (<10 s target via
-      snapshot-resume)
-
-## Phase 5 — Distribution
-- [ ] Runtime JIT capability detection + `QEMUJITEngine` for alt-marketplace
-      builds (EU)
-- [ ] App Review dry run against rule 4.7 (emulated content sandboxing)
-- [ ] Rename the product (trademark), app icon, store assets
-- [ ] TestFlight → App Store submission; AltStore PAL build in parallel
-
-## Later / stretch
-- Windows-ARM "power bottles" (user-supplied image) for Wine-incompatible apps
-- GPU acceleration (Venus → MoltenVK)
-- Community bottle recipes (known-good install scripts per app, à la
-  CrossOver's compatibility database)
+## Standing rules
+- Host-first: nothing lands in the fork without a Linux/macOS test.
+- Upstream what's upstreamable (16K-page fixes, ARM64EC work) to reduce
+  long-term fork drift.
+- The VM fallback (`appendix-vm-approach.md`) is only revisited if a
+  platform-rule change makes it strictly better for users.

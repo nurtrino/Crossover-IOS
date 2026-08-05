@@ -1,3 +1,5 @@
+> **Retired 2026-08-05.** The project now targets a native in-process Wine port — see `NATIVE_PORT.md`. This VM-based design is kept as a documented fallback only.
+
 # Architecture
 
 The product goal is CrossOver's UX, not CrossOver's implementation: the user

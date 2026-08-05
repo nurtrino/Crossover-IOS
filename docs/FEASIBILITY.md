@@ -1,7 +1,14 @@
 # Feasibility: Windows apps on iPadOS/iOS
 
+> **Decision (2026-08-05):** the project targets the **native in-process Wine
+> port**, eyes open about the cost — see `NATIVE_PORT.md` for the attack plan
+> on each constraint below. This document remains the record of the platform
+> constraints themselves; the constraints are real even though the conclusion
+> drawn in § 1 ("not a product") has been overridden by choosing the
+> sideload-first path and funding the multi-process rewrite.
+
 This document is the ground truth for what is and is not possible on the platform.
-Every design decision in `ARCHITECTURE.md` traces back to a constraint here.
+Every design decision traces back to a constraint here.
 
 ## 1. Why CrossOver/Wine cannot be ported natively
 
