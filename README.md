@@ -23,18 +23,28 @@ permanently — the App Store is not the target. Full engineering plan:
 
 ## Status
 
-**Phase 1 of 5 — pseudo-process substrate: prototype passing.**
+**Phase 2 — the server half of milestone M1 is proven on real Wine.**
 
-- `native/pseudoproc/` — processes-as-threads model (spawn/wait/exit codes,
-  per-process identity, aux threads, nested spawn) **+** wineserver-as-thread
-  wire-model proof (per-client socketpairs, poll loop, global handle table,
-  concurrent clients). `make test` runs both suites; 100× stress-clean.
-- `CrossoverPad/` — SwiftUI bottle-manager app scaffold (XcodeGen), engine
-  abstraction with mock backend; `NativeWineEngine` lands in Phase 3.
-- `docs/` — feasibility record, native-port master plan, phased roadmap.
+Real, tested results (host-first on Linux, against genuine wine-11.0):
 
-Current target — **M1**: `wine notepad.exe` on Linux with fork/exec compiled
-out, every Windows process a pseudo-process. See
+- `native/pseudoproc/` — processes-as-threads substrate (spawn/wait/exit,
+  per-process identity, nested spawn) + a wineserver-as-thread wire-model
+  proof. `make test`, 100× stress-clean.
+- `native/wineforge/` — the fork workbench. The **genuine `wine` loader**
+  completes the full `init_first_thread` handshake against **wineserver
+  running as a thread**, with no forked server; one in-thread server
+  multiplexes 8+ concurrent real Wine processes and self-shuts-down cleanly
+  (hard handshake count from the server's own trace).
+- `native/patches/` — the fork as a quilt series over a pinned submodule:
+  **0001** makes wineserver embeddable (returns instead of `exit()`ing);
+  **0002** forbids the client from forking a server. Both round-trip clean.
+- `CrossoverPad/` — SwiftUI bottle-manager scaffold (mock engine today).
+
+**What's left for M1** — the client half: load ntdll + the PE loader
+in-process and replace `CreateProcess`→`exec` with an in-address-space spawn
+(patch series **0003**, scoped in [`docs/NATIVE_PORT.md`](docs/NATIVE_PORT.md)).
+This is the large centerpiece. iOS bring-up (M2) additionally needs a macOS +
+iOS SDK toolchain to cross-compile for ARM64. See
 [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Building
