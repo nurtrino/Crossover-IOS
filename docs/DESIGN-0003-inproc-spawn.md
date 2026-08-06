@@ -188,6 +188,35 @@ piecemeal: steps 1+3 only become testable together (a child either registers
 and runs or crashes), so it must arrive as a single tested unit rather than
 untested half-integration — the discipline that has kept every commit green.
 
+### Refined scope after following the attach to ground truth
+
+`peb` and `fd_socket` were the cleanly-bounded globals (natural per-process
+homes: `TEB->Peb`, a PEB-keyed table). Tracing `server_init_process_done`
+and `signal_start_thread` to completion shows the attach also pulls in:
+
+- **`main_image_info`** (`loader.c:194`) — the main EXE's
+  `SECTION_IMAGE_INFORMATION`, **32 uses across 7 files** including
+  `signal_arm64.c` and `virtual.c`. `server_init_process_done` reads its
+  `TransferAddress` for the entry jump, so a child needs its own. This is
+  woven through core/arch paths — not a clean `current_x()` swap like the
+  first two.
+- **Arch thread bring-up** — `signal_start_thread` / `signal_alloc_thread`
+  set up the syscall frame, kernel stack, and thread register per arch
+  (`signal_x86_64.c`, `signal_arm64.c`). The child's process-thread must run
+  this correctly with its own TEB.
+- **A stripped `server_init_process`** — the child must run only the
+  per-process tail (receive request fd, version check, `init_first_thread`,
+  `set_thread_id`), *not* the one-time global init (`init_environment`,
+  `init_cpu_info`, `native_machine`/`supported_machines` setup) already done
+  by the shared ntdll.
+
+So the honest remaining estimate is **one more entangled global
+(`main_image_info`) + arch thread bring-up + a carefully-factored
+process-init tail**, landed together as a tested unit. The two clean globals
+are done; this last chunk is the genuinely hard, iteration-heavy Wine-internals
+work — best done where a crashing child can be debugged interactively, not
+blind in a headless batch.
+
 ## Risks / open questions
 
 - **Per-process DLL globals.** DLLs written assuming one process per address
