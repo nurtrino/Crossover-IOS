@@ -99,7 +99,7 @@ Measured coupling on the Unix side (wine-11.0): **81 direct `peb` uses across
 | `system.c` | 12 | post-init queries | convert |
 | `virtual.c` | 10 | **includes pre-TEB init** | keep the early ones global; convert the rest |
 | `server.c` | 5 | post-init | convert |
-| `thread.c` | 4 | post-init | convert |
+| `thread.c` | 4 | post-init (runtime queries) | **converted (0003b)** |
 | `signal_*.c`, `loader.c`, `debug.c` | ~10 | mixed | case-by-case |
 
 Rule: any use reachable before `virtual_alloc_first_teb()` must stay on the

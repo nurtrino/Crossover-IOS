@@ -96,6 +96,44 @@ index 4c2e7eb..8978269 100644
          else
          {
              ULONG_PTR val = 0;
+diff --git a/dlls/ntdll/unix/thread.c b/dlls/ntdll/unix/thread.c
+index 24cd058..fff5fb3 100644
+--- a/dlls/ntdll/unix/thread.c
++++ b/dlls/ntdll/unix/thread.c
+@@ -1556,7 +1556,7 @@ NTSTATUS send_debug_event( EXCEPTION_RECORD *rec, CONTEXT *context, BOOL first_c
+     union select_op select_op;
+     sigset_t old_set;
+ 
+-    if (!peb->BeingDebugged) return 0;  /* no debugger present */
++    if (!current_peb()->BeingDebugged) return 0;  /* no debugger present */
+ 
+     pthread_sigmask( SIG_BLOCK, &server_block_set, &old_set );
+ 
+@@ -2692,21 +2692,21 @@ ULONG WINAPI NtGetCurrentProcessorNumber(void)
+     }
+ #endif
+ 
+-    if (peb->NumberOfProcessors > 1)
++    if (current_peb()->NumberOfProcessors > 1)
+     {
+         ULONG_PTR thread_mask, processor_mask;
+ 
+         if (!NtQueryInformationThread( GetCurrentThread(), ThreadAffinityMask,
+                                        &thread_mask, sizeof(thread_mask), NULL ))
+         {
+-            for (processor = 0; processor < peb->NumberOfProcessors; processor++)
++            for (processor = 0; processor < current_peb()->NumberOfProcessors; processor++)
+             {
+                 processor_mask = (1 << processor);
+                 if (thread_mask & processor_mask)
+                 {
+                     if (thread_mask != processor_mask)
+                         FIXME( "need multicore support (%d processors)\n",
+-                               peb->NumberOfProcessors );
++                               current_peb()->NumberOfProcessors );
+                     return processor;
+                 }
+             }
 diff --git a/dlls/ntdll/unix/unix_private.h b/dlls/ntdll/unix/unix_private.h
 index 3932b17..be64ec3 100644
 --- a/dlls/ntdll/unix/unix_private.h
