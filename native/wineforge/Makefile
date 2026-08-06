@@ -22,7 +22,8 @@ WINE_LOADER ?= $(abspath $(WINE_BUILD))/loader/wine
 WINESERVER_BIN ?= $(abspath $(WINE_BUILD))/server/wineserver
 
 all: $(BUILD)/server/embed_test $(BUILD)/server/embed_run_test \
-     $(BUILD)/server/real_client_test $(BUILD)/server/real_multi_test $(BUILD)/nls
+     $(BUILD)/server/real_client_test $(BUILD)/server/real_multi_test \
+     $(BUILD)/peload_test $(BUILD)/nls
 
 $(BUILD)/server:
 	mkdir -p $(BUILD)/server
@@ -51,9 +52,14 @@ $(BUILD)/server/real_client_test: real_client_test.c $(BUILD)/server/main_lib.o 
 $(BUILD)/server/real_multi_test: real_multi_test.c $(BUILD)/server/main_lib.o $(SERVER_OBJS)
 	$(CC) $(CFLAGS) -o $@ real_multi_test.c $(BUILD)/server/main_lib.o $(SERVER_OBJS) -pthread
 
+# Self-contained PE mapping/relocation test (no wine objects needed).
+$(BUILD)/peload_test: peload_test.c | $(BUILD)/server
+	$(CC) $(CFLAGS) -o $@ peload_test.c
+
 test: all
 	$(BUILD)/server/embed_test
 	$(BUILD)/server/embed_run_test
+	$(BUILD)/peload_test
 
 # Require the full Wine build (loader + ntdll). Not in `test` since they are
 # heavier and environment-sensitive; run explicitly.
