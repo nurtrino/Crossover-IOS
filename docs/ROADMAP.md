@@ -52,10 +52,8 @@ Every phase ends with something demonstrable.
   - [ ] 0003c: in-address-space child PE mapping + relocation
   - [ ] 0003d: child `init_first_thread` on the handed socket
   - [ ] 0003e: end-to-end in-process `CreateProcess` (installer→app)
-- [ ] M1 complete: `wine notepad.exe` with all fork/exec compiled out
-- [ ] Lower `NtCreateUserProcess` onto `pproc_spawn`; compile out fork/exec
-- [ ] Per-pseudo-process PEB + loader module-list instancing
-- [ ] **M1: `wine notepad.exe` with zero fork/exec, single host process**
+- [ ] M1 complete: `wine notepad.exe` with all fork/exec compiled out,
+      single host process
 
 ## Phase 3 — iOS bring-up (WS-C) → M2
 - [ ] Cross-build the fork against the iOS SDK (winelib static libs + dylibs)
