@@ -96,9 +96,9 @@ Measured coupling on the Unix side (wine-11.0): **81 direct `peb` uses across
 |---|---:|---|---|
 | `process.c` | 6 | post-init (spawn/query) | **converted (0003b)** |
 | `env.c` | 34 | mixed; `virtual_alloc_first_teb` + params | split: keep pre-init, convert the rest |
-| `system.c` | 12 | post-init queries | convert |
+| `system.c` | 12 | post-init (all after first TEB) | **converted (0003b)** |
 | `virtual.c` | 10 | **includes pre-TEB init** | keep the early ones global; convert the rest |
-| `server.c` | 5 | post-init | convert |
+| `server.c` | 5 | init-path; 4 after first TEB | **4 converted (0003b)**; wow64 layout kept |
 | `thread.c` | 4 | post-init (runtime queries) | **converted (0003b)** |
 | `signal_*.c`, `loader.c`, `debug.c` | ~10 | mixed | case-by-case |
 

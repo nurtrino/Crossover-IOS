@@ -46,7 +46,7 @@ Every phase ends with something demonstrable.
         backend; default unchanged (no regression), in-process backend wired
         and reached under `WINE_INPROC_SPAWN` (stub → `STATUS_NOT_IMPLEMENTED`)
   - [~] 0003b: per-pseudo-process PEB/TEB + context plumbing — `current_peb()`
-        indirection added; `process.c` + `thread.c` converted (10/81 uses, zero regression). Remaining:
+        indirection added; `process.c`, `thread.c`, `system.c`, `server.c` converted (26/81, zero regression). Remaining env.c/virtual.c
         file-by-file conversion of the other 75 global-`peb` uses (ledger in
         the design doc), then per-pseudo-process PEB allocation
   - [ ] 0003c: in-address-space child PE mapping + relocation

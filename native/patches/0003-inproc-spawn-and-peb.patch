@@ -96,6 +96,156 @@ index 4c2e7eb..8978269 100644
          else
          {
              ULONG_PTR val = 0;
+diff --git a/dlls/ntdll/unix/server.c b/dlls/ntdll/unix/server.c
+index 258a959..8d12d90 100644
+--- a/dlls/ntdll/unix/server.c
++++ b/dlls/ntdll/unix/server.c
+@@ -1677,7 +1677,7 @@ size_t server_init_process(void)
+             obj_handle_t handle;
+             pid               = reply->pid;
+             tid               = reply->tid;
+-            peb->SessionId    = reply->session_id;
++            current_peb()->SessionId    = reply->session_id;
+             info_size         = reply->info_size;
+             server_start_time = reply->server_start;
+             supported_machines_count = wine_server_reply_size( reply ) / sizeof(*supported_machines);
+@@ -1758,14 +1758,14 @@ void server_init_process_done(void)
+     SERVER_START_REQ( init_process_done )
+     {
+         req->teb = wine_server_client_ptr( teb );
+-        req->peb = NtCurrentTeb64() ? NtCurrentTeb64()->Peb : wine_server_client_ptr( peb );
++        req->peb = NtCurrentTeb64() ? NtCurrentTeb64()->Peb : wine_server_client_ptr( current_peb() );
+         status = wine_server_call( req );
+         suspend = reply->suspend;
+     }
+     SERVER_END_REQ;
+ 
+     assert( !status );
+-    signal_start_thread( main_image_info.TransferAddress, peb, suspend, NtCurrentTeb() );
++    signal_start_thread( main_image_info.TransferAddress, current_peb(), suspend, NtCurrentTeb() );
+ }
+ 
+ 
+@@ -1952,7 +1952,7 @@ NTSTATUS WINAPI NtClose( HANDLE handle )
+     if (fd != -1) close( fd );
+ 
+     if (ret != STATUS_INVALID_HANDLE || !handle) return ret;
+-    if (!peb->BeingDebugged) return ret;
++    if (!current_peb()->BeingDebugged) return ret;
+     if (!NtQueryInformationProcess( NtCurrentProcess(), ProcessDebugPort, &port, sizeof(port), NULL) && port)
+     {
+         NtCurrentTeb()->ExceptionCode = ret;
+diff --git a/dlls/ntdll/unix/system.c b/dlls/ntdll/unix/system.c
+index 350bcea..a7d927a 100644
+--- a/dlls/ntdll/unix/system.c
++++ b/dlls/ntdll/unix/system.c
+@@ -1265,7 +1265,7 @@ static NTSTATUS create_logical_proc_info(void)
+     size_t size;
+     unsigned int p, i, j, k;
+ 
+-    lcpu_no = peb->NumberOfProcessors;
++    lcpu_no = current_peb()->NumberOfProcessors;
+ 
+     size = sizeof(pkgs_no);
+     if (sysctlbyname("hw.packages", &pkgs_no, &size, NULL, 0))
+@@ -1613,7 +1613,7 @@ void init_cpu_info(void)
+     num = 1;
+     FIXME("Detecting the number of processors is not supported.\n");
+ #endif
+-    peb->NumberOfProcessors = num;
++    current_peb()->NumberOfProcessors = num;
+     init_cpu_model();
+ }
+ 
+@@ -1623,7 +1623,7 @@ static SYSTEM_CPU_INFORMATION get_cpuinfo(void)
+     {
+         .ProcessorLevel        = cpu_level,
+         .ProcessorRevision     = cpu_revision,
+-        .MaximumProcessors     = peb->NumberOfProcessors,
++        .MaximumProcessors     = current_peb()->NumberOfProcessors,
+         .ProcessorFeatureBits  = get_cpu_features(),
+ #ifdef __arm__
+         .ProcessorArchitecture = PROCESSOR_ARCHITECTURE_ARM,
+@@ -1652,7 +1652,7 @@ static NTSTATUS create_cpuset_info(SYSTEM_CPU_SET_INFORMATION *info)
+ 
+     if (!logical_proc_info_ex) return STATUS_NOT_IMPLEMENTED;
+ 
+-    count = peb->NumberOfProcessors;
++    count = current_peb()->NumberOfProcessors;
+ 
+     max_cache_level = 0;
+     proc_info = logical_proc_info_ex;
+@@ -2590,14 +2590,14 @@ static void get_cpu_idle_cycle_times( ULONG64 *times )
+     unsigned long long idle;
+     FILE *f;
+ 
+-    memset( times, 0, peb->NumberOfProcessors * sizeof(*times) );
++    memset( times, 0, current_peb()->NumberOfProcessors * sizeof(*times) );
+     if (!(f = fopen( "/proc/stat", "r" ))) return;
+ 
+     /* skip combined cpu statistics line. */
+     fgets( line, sizeof(line), f );
+ 
+     index = 0;
+-    while (fgets( line, sizeof(line), f ) && index < peb->NumberOfProcessors)
++    while (fgets( line, sizeof(line), f ) && index < current_peb()->NumberOfProcessors)
+     {
+         count = sscanf(line, "%s %*u %*u %*u %llu", name, &idle);
+ 
+@@ -2617,7 +2617,7 @@ static void get_cpu_idle_cycle_times( ULONG64 *times )
+     static int once;
+ 
+     if (!once++) FIXME( "SystemProcessorIdleCycleTimeInformation stub.\n" );
+-    memset( times, 0, peb->NumberOfProcessors * sizeof(*times) );
++    memset( times, 0, current_peb()->NumberOfProcessors * sizeof(*times) );
+ }
+ 
+ #endif
+@@ -3358,7 +3358,7 @@ NTSTATUS WINAPI NtQuerySystemInformation( SYSTEM_INFORMATION_CLASS class,
+         {
+             static int i = 1;
+             unsigned int n;
+-            cpus = min(peb->NumberOfProcessors, out_cpus);
++            cpus = min(current_peb()->NumberOfProcessors, out_cpus);
+             FIXME("stub info_class SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION\n");
+             /* many programs expect these values to change so fake change */
+             for (n = 0; n < cpus; n++)
+@@ -3484,7 +3484,7 @@ NTSTATUS WINAPI NtQuerySystemInformation( SYSTEM_INFORMATION_CLASS class,
+ 
+     case SystemInterruptInformation: /* 23 */
+     {
+-        len = peb->NumberOfProcessors * sizeof(SYSTEM_INTERRUPT_INFORMATION);
++        len = current_peb()->NumberOfProcessors * sizeof(SYSTEM_INTERRUPT_INFORMATION);
+         if (size >= len)
+         {
+             if (!info) ret = STATUS_ACCESS_VIOLATION;
+@@ -3949,7 +3949,7 @@ NTSTATUS WINAPI NtQuerySystemInformationEx( SYSTEM_INFORMATION_CLASS class,
+     switch (class)
+     {
+     case SystemProcessorIdleCycleTimeInformation:
+-        len = peb->NumberOfProcessors * sizeof(ULONG64);
++        len = current_peb()->NumberOfProcessors * sizeof(ULONG64);
+         if (!query || query_len < sizeof(USHORT) || *(USHORT *)query) return STATUS_INVALID_PARAMETER;
+         if (size < len)
+         {
+@@ -3995,7 +3995,7 @@ NTSTATUS WINAPI NtQuerySystemInformationEx( SYSTEM_INFORMATION_CLASS class,
+ 
+     case SystemCpuSetInformation:
+     {
+-        unsigned int cpu_count = peb->NumberOfProcessors;
++        unsigned int cpu_count = current_peb()->NumberOfProcessors;
+         PROCESS_BASIC_INFORMATION pbi;
+         HANDLE process;
+ 
+@@ -4478,7 +4478,7 @@ NTSTATUS WINAPI NtPowerInformation( POWER_INFORMATION_LEVEL level, void *input,
+         int i, out_cpus;
+ 
+         if ((output == NULL) || (out_size == 0)) return STATUS_INVALID_PARAMETER;
+-        out_cpus = peb->NumberOfProcessors;
++        out_cpus = current_peb()->NumberOfProcessors;
+         if ((out_size / sizeof(PROCESSOR_POWER_INFORMATION)) < out_cpus) return STATUS_BUFFER_TOO_SMALL;
+ #if defined(linux)
+         {
 diff --git a/dlls/ntdll/unix/thread.c b/dlls/ntdll/unix/thread.c
 index 24cd058..fff5fb3 100644
 --- a/dlls/ntdll/unix/thread.c
