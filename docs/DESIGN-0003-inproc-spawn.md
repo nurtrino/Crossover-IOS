@@ -148,6 +148,46 @@ child's `fd_socket` at `socketfd[0]`, run the `init_first_thread` handshake
 entry. Every one of those sub-mechanics is individually proven; the remaining
 work is the two globals above plus wiring the sequence together.
 
+## Attach implementation spec (0003d/e) — the final integration
+
+Both process-globals are now virtualized (tested, zero regression):
+
+- **`peb`** → `current_peb()` on the hot path; `init_teb` sets `teb->Peb`, so a
+  child thread whose TEB carries a distinct PEB gets its own process identity
+  and (for free) its own module list via `Peb->LdrData`.
+- **`fd_socket`** → `current_server_fd()`, a PEB-keyed registry; the child's
+  socket is registered under the child PEB, so its server traffic never
+  touches the parent's connection.
+
+With those in place, `spawn_process_inproc` performs the attach on a fresh
+pthread (a pproc thread group), replacing fork+exec. The precise sequence,
+each step mapped to existing Wine machinery:
+
+1. **Child TEB+PEB.** Allocate a PEB (template-copy the parent's, then reset
+   per-process fields) and call `virtual_alloc_teb(&teb)`; set `teb->Peb =
+   child_peb`. Install the TEB on the new thread (`signal_init_thread`/arch
+   thread-register set), and `signal_alloc_thread` for its syscall frame +
+   kernel stack.
+2. **Server connection.** `set_process_server_fd(child_peb, socketfd[0])` so
+   `current_server_fd()` resolves to the handed socket for this process.
+3. **First-thread handshake.** Run the `server_init_process` tail on this
+   thread: `wine_server_receive_fd` for the request fd, version check,
+   `init_first_thread` request. The server already created the process object
+   (parent's `new_process`), so the child becomes a first-class process on the
+   shared in-thread server — the crux, and the exact exchange experiment 002
+   proved works over a handed socket.
+4. **Image.** Map + relocate the child PE (mechanic proven by `peload_test`;
+   in ntdll this is `virtual_map_image` / the builtin loader) into the shared
+   address space, resolving base collisions by relocation.
+5. **Run.** Enter via `RtlUserThreadStart` → PE entry on the child thread. On
+   exit, `NtTerminateProcess` unwinds the thread group; the server reaps the
+   process object (the 0001 embeddable-shutdown machinery generalizes).
+
+This is the one remaining coherent chunk. It is deliberately not landed
+piecemeal: steps 1+3 only become testable together (a child either registers
+and runs or crashes), so it must arrive as a single tested unit rather than
+untested half-integration — the discipline that has kept every commit green.
+
 ## Risks / open questions
 
 - **Per-process DLL globals.** DLLs written assuming one process per address
