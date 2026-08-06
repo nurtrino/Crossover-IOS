@@ -69,4 +69,25 @@ fast — forking no server — when it is absent.
 This is the first client-side patch. The large remaining client-side work
 (loading ntdll + the PE loader in-process and replacing `CreateProcess`→
 `exec_wineloader` with a `pproc_spawn`-style in-address-space launch) is
-scoped as series 0003 in `docs/NATIVE_PORT.md`.
+scoped as series 0003 in `docs/DESIGN-0003-inproc-spawn.md`.
+
+### 0003-inproc-spawn-and-peb.patch
+
+The in-process-launch groundwork (stages a + b of series 0003). Default
+behavior is byte-for-byte unchanged; the new paths are opt-in / equivalent.
+
+- **Stage a — spawn seam** (`dlls/ntdll/unix/process.c`): `spawn_process` is
+  split into `spawn_process_fork` (the classic backend, unchanged) and
+  `spawn_process_inproc` (the future in-address-space launch), dispatched on
+  `WINE_INPROC_SPAWN`. The in-process backend is wired but returns
+  `STATUS_NOT_IMPLEMENTED` until the PE loader (stage c) and child
+  `init_first_thread` (stage d) land.
+- **Stage b — PEB indirection** (`dlls/ntdll/unix/unix_private.h`,
+  `process.c`): add `current_peb()` = `NtCurrentTeb()->Peb`, the hook for
+  per-pseudo-process PEBs, and convert `process.c`'s post-init global-`peb`
+  uses to it. Since `init_teb` sets `teb->Peb = peb` for the primary process,
+  this is a zero-behavior-change step. The full file-by-file conversion
+  ledger (81 uses / 10 files) is in `docs/DESIGN-0003-inproc-spawn.md`.
+
+Validated by `native/wineforge/spawn_seam_test.sh` (both dispatch directions)
+and the whole wineforge suite staying green after the PEB conversion.

@@ -45,7 +45,10 @@ Every phase ends with something demonstrable.
   - [x] **0003a: spawn seam** — `spawn_process` dispatches fork vs in-process
         backend; default unchanged (no regression), in-process backend wired
         and reached under `WINE_INPROC_SPAWN` (stub → `STATUS_NOT_IMPLEMENTED`)
-  - [ ] 0003b: per-pseudo-process PEB/TEB + context plumbing
+  - [~] 0003b: per-pseudo-process PEB/TEB + context plumbing — `current_peb()`
+        indirection added; `process.c` converted (zero regression). Remaining:
+        file-by-file conversion of the other 75 global-`peb` uses (ledger in
+        the design doc), then per-pseudo-process PEB allocation
   - [ ] 0003c: in-address-space child PE mapping + relocation
   - [ ] 0003d: child `init_first_thread` on the handed socket
   - [ ] 0003e: end-to-end in-process `CreateProcess` (installer→app)

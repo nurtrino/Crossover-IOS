@@ -74,6 +74,41 @@ Replace fork+exec with, on a fresh **pproc** thread group:
 - **0003e — end to end.** `CreateProcess` of a real child (the installer→app
   pattern) fully in one host process. **M1 complete.**
 
+## PEB virtualization (stage 0003b) — measured scope
+
+The single biggest sub-problem. `peb` is one process-global
+(`dlls/ntdll/unix/env.c: PEB *peb`), and every Windows process assumes one
+PEB (process parameters, environment, and the loaded-module list in
+`peb->Ldr`). Giving an in-process child its own identity means routing "my
+process's PEB" through the current thread instead of the global.
+
+The mechanism is cheap and already correct-by-construction: `init_teb()` sets
+`teb->Peb = peb` for every thread, so `current_peb()` (added in
+`unix_private.h`) — `NtCurrentTeb()->Peb` — equals the global for the primary
+process today and becomes per-pseudo-process the moment a child's threads get
+a TEB with a different `Peb`. Converting a call site is therefore a
+zero-behavior-change step now and the hook for multiple processes later.
+
+Measured coupling on the Unix side (wine-11.0): **81 direct `peb` uses across
+10 files.** Conversion ledger:
+
+| file | uses | when it runs | action |
+|---|---:|---|---|
+| `process.c` | 6 | post-init (spawn/query) | **converted (0003b)** |
+| `env.c` | 34 | mixed; `virtual_alloc_first_teb` + params | split: keep pre-init, convert the rest |
+| `system.c` | 12 | post-init queries | convert |
+| `virtual.c` | 10 | **includes pre-TEB init** | keep the early ones global; convert the rest |
+| `server.c` | 5 | post-init | convert |
+| `thread.c` | 4 | post-init | convert |
+| `signal_*.c`, `loader.c`, `debug.c` | ~10 | mixed | case-by-case |
+
+Rule: any use reachable before `virtual_alloc_first_teb()` must stay on the
+global `peb` (no TEB yet). Everything after can move to `current_peb()`. The
+PE side (`dlls/ntdll/*.c`) and higher DLLs already read the PEB via
+`NtCurrentTeb()->Peb`, so they mostly come along for free — the Unix side is
+the concentrated work. This is mechanical but must be done file-by-file with
+the wineforge suite green after each, exactly as 0003b's first file was.
+
 ## Risks / open questions
 
 - **Per-process DLL globals.** DLLs written assuming one process per address

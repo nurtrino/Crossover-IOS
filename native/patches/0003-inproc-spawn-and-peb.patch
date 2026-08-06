@@ -1,5 +1,5 @@
 diff --git a/dlls/ntdll/unix/process.c b/dlls/ntdll/unix/process.c
-index 4c2e7eb..b4cbeba 100644
+index 4c2e7eb..8978269 100644
 --- a/dlls/ntdll/unix/process.c
 +++ b/dlls/ntdll/unix/process.c
 @@ -398,10 +398,13 @@ static BOOL is_unix_console_handle( HANDLE handle )
@@ -19,6 +19,15 @@ index 4c2e7eb..b4cbeba 100644
  {
      NTSTATUS status = STATUS_SUCCESS;
      int stdin_fd = -1, stdout_fd = -1;
+@@ -420,7 +423,7 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
+     {
+         if (!(pid = fork()))  /* grandchild */
+         {
+-            if ((peb->ProcessParameters && params->ProcessGroupId != peb->ProcessParameters->ProcessGroupId) ||
++            if ((current_peb()->ProcessParameters && params->ProcessGroupId != current_peb()->ProcessParameters->ProcessGroupId) ||
+                 params->ConsoleHandle == CONSOLE_HANDLE_ALLOC ||
+                 params->ConsoleHandle == CONSOLE_HANDLE_ALLOC_NO_WINDOW ||
+                 params->ConsoleHandle == NULL)
 @@ -464,6 +467,49 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
  }
  
@@ -69,3 +78,53 @@ index 4c2e7eb..b4cbeba 100644
  /***********************************************************************
   *           __wine_unix_spawnvp
   */
+@@ -591,7 +637,7 @@ static NTSTATUS fork_and_exec( OBJECT_ATTRIBUTES *attr, const char *unix_name, i
+         {
+             close( fd[0] );
+ 
+-            if ((peb->ProcessParameters && params->ProcessGroupId != peb->ProcessParameters->ProcessGroupId) ||
++            if ((current_peb()->ProcessParameters && params->ProcessGroupId != current_peb()->ProcessParameters->ProcessGroupId) ||
+                 params->ConsoleHandle == CONSOLE_HANDLE_ALLOC ||
+                 params->ConsoleHandle == CONSOLE_HANDLE_ALLOC_NO_WINDOW ||
+                 params->ConsoleHandle == NULL)
+@@ -1425,7 +1471,7 @@ NTSTATUS WINAPI NtQueryInformationProcess( HANDLE handle, PROCESSINFOCLASS class
+         len = sizeof(ULONG_PTR);
+         if (size != len) return STATUS_INFO_LENGTH_MISMATCH;
+         if (handle == GetCurrentProcess())
+-            *(ULONG_PTR *)info = is_old_wow64() ? (ULONG_PTR)peb : (ULONG_PTR)wow_peb;
++            *(ULONG_PTR *)info = is_old_wow64() ? (ULONG_PTR)current_peb() : (ULONG_PTR)wow_peb;
+         else
+         {
+             ULONG_PTR val = 0;
+diff --git a/dlls/ntdll/unix/unix_private.h b/dlls/ntdll/unix/unix_private.h
+index 3932b17..be64ec3 100644
+--- a/dlls/ntdll/unix/unix_private.h
++++ b/dlls/ntdll/unix/unix_private.h
+@@ -186,6 +186,27 @@ extern const char **dll_paths;
+ extern const char **system_dll_paths;
+ extern pthread_key_t teb_key;
+ extern PEB *peb;
++
++/*
++ * Crossover-IOS fork, patch series 0003b: per-pseudo-process PEB indirection.
++ *
++ * The global `peb` is the single process control block — fine while one
++ * Windows process owns the address space, but the in-process model
++ * (docs/DESIGN-0003-inproc-spawn.md) runs several. Each pseudo-process's
++ * threads carry their own PEB in TEB->Peb, so post-init code that means "my
++ * process's PEB" should use current_peb() instead of the global. For the
++ * first/primary process the two are identical (init_teb sets teb->Peb = peb),
++ * so converting a call site is a zero-behavior-change step today and the
++ * hook for per-pseudo-process PEBs tomorrow.
++ *
++ * NB: only valid once the current thread has a TEB. Early-init code that runs
++ * before virtual_alloc_first_teb() must keep using the global `peb`.
++ */
++static inline PEB *current_peb(void)
++{
++    return (PEB *)NtCurrentTeb()->Peb;
++}
++
+ extern USHORT *uctable;
+ extern USHORT *lctable;
+ extern SIZE_T startup_info_size;
