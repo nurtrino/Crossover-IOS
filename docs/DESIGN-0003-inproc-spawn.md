@@ -109,6 +109,45 @@ PE side (`dlls/ntdll/*.c`) and higher DLLs already read the PEB via
 the concentrated work. This is mechanical but must be done file-by-file with
 the wineforge suite green after each, exactly as 0003b's first file was.
 
+## The shared-ntdll insight — what actually makes M1 finishable
+
+Fork+exec gives every Windows process a *fresh* ntdll and a full init. The
+in-process child does **not**: it shares the parent's already-initialized
+ntdll in the same address space. So the child never re-runs ntdll init — it
+runs a much lighter **"attach a new Windows process to the running ntdll"**
+path. That collapses "make ntdll init re-entrant" (open-ended) into a small,
+enumerable virtualization set (bounded).
+
+What is already per-process or per-thread, and comes along for free:
+
+- **Module list** — reached as `NtCurrentTeb()->Peb->LdrData` (see
+  `dlls/ntdll/loader.c`). Once the PEB is per-pseudo-process, each process
+  gets its own module list automatically. The whole PE-side loader already
+  routes through `NtCurrentTeb()->Peb`, so it needs no changes.
+- **Per-thread server pipes** — `request_fd`/`reply_fd`/`wait_fd` live in
+  `ntdll_thread_data` (TEB-based), so the child's main thread gets its own by
+  construction (experiment 002 exercised exactly this handshake).
+- **Loader/debug one-shot guards** (`loadorder.c`, `debug.c` `init_done`,
+  `start_server`'s `started`) — these gate *config*, not per-process instance
+  state, and the child that uses a handed socket never calls `start_server`.
+
+What genuinely must be virtualized (the entire core remaining work):
+
+1. **`peb`** — in progress (26/81 unix-side uses converted to `current_peb()`;
+   remainder in `env.c`/`virtual.c`, plus per-pseudo-process PEB allocation).
+2. **`fd_socket`** (`server.c:104`, the SCM_RIGHTS fd-exchange socket, one per
+   process) — must become per-pseudo-process so the child talks to the server
+   over its own `socketfd[0]` without clobbering the parent's. `server_pid`
+   rides along. (`server_block_set` is a signal mask — shared is fine.)
+
+The **attach sequence** `spawn_process_inproc` then performs, on a new pproc
+thread with a fresh TEB whose `Peb` points at a freshly-allocated child PEB:
+map+relocate the child PE (mechanic proven by `peload_test`), point the
+child's `fd_socket` at `socketfd[0]`, run the `init_first_thread` handshake
+(proven against the in-thread server by experiment 002), then jump to the PE
+entry. Every one of those sub-mechanics is individually proven; the remaining
+work is the two globals above plus wiring the sequence together.
+
 ## Risks / open questions
 
 - **Per-process DLL globals.** DLLs written assuming one process per address

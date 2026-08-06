@@ -49,9 +49,18 @@ Every phase ends with something demonstrable.
         indirection added; `process.c`, `thread.c`, `system.c`, `server.c` converted (26/81, zero regression). Remaining env.c/virtual.c
         file-by-file conversion of the other 75 global-`peb` uses (ledger in
         the design doc), then per-pseudo-process PEB allocation
-  - [ ] 0003c: in-address-space child PE mapping + relocation
-  - [ ] 0003d: child `init_first_thread` on the handed socket
-  - [ ] 0003e: end-to-end in-process `CreateProcess` (installer→app)
+  - [x] **0003c: in-address-space PE mapping + relocation** — `peload_test`
+        loads a PE at a non-preferred base, relocates it, runs it, with two
+        images coexisting (parent+child mechanic). Core loader mechanic proven
+  - Remaining, now bounded by the shared-ntdll insight (child shares the
+    parent's ntdll → only two globals need virtualizing, module list rides on
+    the PEB; see design doc):
+    - [~] per-pseudo-process **PEB** allocation (indirection + hot-path uses
+          done; finish env.c/virtual.c + allocate child PEB)
+    - [ ] per-pseudo-process **`fd_socket`** (child's own server connection)
+    - [ ] 0003d: run child `init_first_thread` on the handed socket
+    - [ ] 0003e: assemble the attach sequence in `spawn_process_inproc` —
+          end-to-end in-process `CreateProcess`
 - [ ] M1 complete: `wine notepad.exe` with all fork/exec compiled out,
       single host process
 
