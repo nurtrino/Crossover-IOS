@@ -135,8 +135,29 @@ PEB-keyed registry, and the first-thread handshake (`init_first_thread` +
 `spawn_seam_test.sh` asserts it with server-side evidence: wineboot's two
 child processes attach in-process and the server's `-d1` trace counts their
 handshakes (3 = primary + 2 children), deterministic across runs; the fork
-backend stays regression-free. The child does not yet run its PE image —
-that is 0003e, the end-to-end finish of M1's client half.
+backend stays regression-free.
+
+### 006 — the child's own startup info and image (PASSING)
+
+Patch 0003e: `main_image_info` becomes per-pseudo-process via
+`current_image_info()`, and a child now fetches its **own** startup info from
+the server, builds its own process parameters, and maps its own main EXE —
+asserted by `spawn_seam_test.sh` (both children map
+`L"C:\windows\system32\wineboot.exe"` with real base/entry addresses).
+
+Findings:
+
+8. **`init_process_done` destroys the staged startup info.** The server's
+   `set_process_startup_state()` releases `process->startup_info`, so a child
+   that reports done before calling `get_startup_info` gets an empty reply —
+   and `env_size == 0` underflows `env_pos` to `SIZE_MAX`. The child's
+   handshake must follow the normal loader's order
+   (`init_first_thread` → `get_startup_info` → `init_process_done`).
+9. **The PE-side loader is the last blocker.** Entering the child's image
+   (gated behind `WINE_INPROC_RUN`) runs `LdrInitializeThunk` for a second
+   Windows process in one address space. The module list rides on the PEB and
+   is per-process for free, but the PE-side loader's own statics still alias.
+   That is the whole remaining gap between here and M1.
 
 ### Next: client-side process elimination
 

@@ -40,13 +40,19 @@ Real, tested results (host-first on Linux, against genuine wine-11.0):
   **0002** forbids the client from forking a server. Both round-trip clean.
 - `CrossoverPad/` — SwiftUI bottle-manager scaffold (mock engine today).
 
-**Client half in progress — the in-process attach works (0003d).** Under
-`WINE_INPROC_SPAWN`, `CreateProcess` now launches the child as a thread group
-in the same host process — no fork/exec: fresh PEB/TEB, own server socket,
-`init_first_thread` + `init_process_done` on the handed socket, counted by
-the server as a first-class process (hard `-d1`-trace evidence, zero
-regression on the fork backend). **What's left for M1** is **0003e**: map the
-child's PE and run it (per-process module list, cloned params, entry jump) —
+**Client half nearly done — in-process children exist and load their own
+programs (0003d + 0003e).** Under `WINE_INPROC_SPAWN`, `CreateProcess`
+launches the child as a thread group in the same host process — no
+fork/exec. The child gets its own PEB/TEB and server socket, completes the
+`init_first_thread` handshake as a first-class process on the shared server,
+then fetches its **own** startup info and maps its **own** main EXE (real
+base + entry addresses; all three process-globals — `peb`, `fd_socket`,
+`main_image_info` — are now per-pseudo-process). Hard `-d1`-trace evidence,
+deterministic, zero regression on the fork backend.
+
+**What's left for M1** is the last step: *running* the child's image. The
+entry jump is wired behind `WINE_INPROC_RUN`, but executing it needs
+per-process instancing of ntdll's PE-side loader state — the long tail
 scoped in [`docs/DESIGN-0003-inproc-spawn.md`](docs/DESIGN-0003-inproc-spawn.md).
 iOS bring-up (M2) additionally needs a macOS + iOS SDK toolchain to
 cross-compile for ARM64. See [`docs/ROADMAP.md`](docs/ROADMAP.md).

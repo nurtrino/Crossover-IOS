@@ -47,19 +47,29 @@ WINEPREFIX="$prefix" "$wineserver" -k 2>/dev/null   # in case a client hung
 wait "$srvpid" 2>/dev/null
 
 attached=$(grep -c "in-process child attached" "$clientlog")
+mapped=$(grep -c "in-process child image mapped" "$clientlog")
 handshakes=$(grep -c "init_first_thread( unix_pid" "$srvlog")
 echo "  in-process children attached: $attached"
+echo "  in-process children with their own image mapped: $mapped"
 echo "  server-side init_first_thread handshakes: $handshakes"
+grep -m1 "in-process child image mapped" "$clientlog" | sed 's/^/    /'
 
 rm -rf "$prefix"
 
 [ "$attached" -ge 1 ] || { echo "--- client log ---"; cat "$clientlog"; rm -f "$srvlog" "$clientlog"; \
     fail "no in-process child completed the attach"; }
+# 0003e: every attached child fetched its own startup info from the server and
+# mapped its own main EXE (per-process PEB + main_image_info)
+[ "$mapped" -eq "$attached" ] || { echo "--- client log ---"; cat "$clientlog"; rm -f "$srvlog" "$clientlog"; \
+    fail "an in-process child failed to map its own image ($mapped/$attached)"; }
+grep -q "in-process child image mapped: L\"C:" "$clientlog" || { rm -f "$srvlog" "$clientlog"; \
+    fail "child image path does not look like a real Windows image"; }
 # every attached child did a real handshake the server counted, on top of
 # the primary wineboot process's own
 [ "$handshakes" -ge $((attached + 1)) ] || { rm -f "$srvlog" "$clientlog"; \
     fail "server trace does not account for the in-process children"; }
 rm -f "$srvlog" "$clientlog"
 
-echo "  ok: in-process children are first-class processes on the server"
+echo "  ok: in-process children are first-class processes on the server,"
+echo "      each with its own startup info and its own mapped main image"
 echo "PASS: CreateProcess spawn seam dispatches correctly both ways"

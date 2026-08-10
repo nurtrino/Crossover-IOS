@@ -89,5 +89,43 @@ behavior is byte-for-byte unchanged; the new paths are opt-in / equivalent.
   this is a zero-behavior-change step. The full file-by-file conversion
   ledger (81 uses / 10 files) is in `docs/DESIGN-0003-inproc-spawn.md`.
 
-Validated by `native/wineforge/spawn_seam_test.sh` (both dispatch directions)
-and the whole wineforge suite staying green after the PEB conversion.
+- **Stage d — the attach** (`process.c`, `server.c`): `spawn_process_inproc`
+  launches the child as a thread group in the same host process — child PEB
+  (template-copied) + TEB, its own server socket in the PEB-keyed registry,
+  and `server_init_process_inproc()` running the per-process first-thread tail
+  on the handed socket.
+- **Stage e — the child's own image** (`loader.c`, `env.c`, `virtual.c`):
+  `main_image_info` joins `peb`/`fd_socket` as a per-pseudo-process value via
+  `current_image_info()`; `build_startup_info()` is parameterised so
+  `init_startup_info_inproc()` lets a child fetch its own startup info from
+  the server and map its own main EXE. `server_init_process_done_inproc()` is
+  split out because `init_process_done` makes the server drop the staged
+  startup info — it must come *after* `get_startup_info`.
+
+Validated by `native/wineforge/spawn_seam_test.sh` (both dispatch directions,
+plus server-side handshake counts and per-child image mapping) and the whole
+wineforge suite staying green.
+
+### Regenerating a patch — read this first
+
+Patches are sequential diffs against the *evolving* tree, so a patch must be
+generated with its predecessors applied. Two traps, both hit in practice:
+
+1. **0002 and 0003 both touch `dlls/ntdll/unix/loader.c`.** A naive
+   `git diff -- dlls/ntdll/unix/` folds 0002's hunk into 0003, and the series
+   then fails to apply. Strip 0002 first:
+
+   ```sh
+   W=$PWD/../wine; P=$PWD
+   git -C "$W" apply -R "$P/0002-no-fork-embedded-server.patch"
+   git -C "$W" diff -- dlls/ntdll/unix/ > "$P/0003-inproc-spawn-and-peb.patch"
+   git -C "$W" apply "$P/0002-no-fork-embedded-server.patch"
+   ```
+
+2. **`git -C <dir>` resolves relative paths inside `<dir>`.** Always pass the
+   patch as an absolute path, or `git -C wine apply patches/foo.patch` looks
+   for `wine/patches/foo.patch`, fails, and — if you ignore the error — the
+   next redirect can overwrite the patch you were trying to regenerate.
+
+Always finish with the round-trip check:
+`./apply.sh --reverse && ./apply.sh --check && ./apply.sh`.

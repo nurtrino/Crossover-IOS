@@ -65,9 +65,17 @@ Every phase ends with something demonstrable.
         counts the in-process children as first-class processes
         (`spawn_seam_test.sh`: 2 children attach, 3 handshakes, deterministic;
         zero regression on the fork backend)
-    - [ ] 0003e: map+run the child PE (per-process module list, cloned
-          params, `main_image_info`, entry via `signal_start_thread`) →
-          end-to-end in-process `CreateProcess`
+  - [~] **0003e: the child's own startup info + image** — `main_image_info`
+        virtualized per-pseudo-process (`current_image_info()`, the third and
+        last entangled global); `build_startup_info()` parameterised so a
+        child fetches its own startup info from the server, builds its own
+        process parameters, and maps its own main EXE. Verified: both of
+        wineboot's children map `C:\windows\system32\wineboot.exe` with real
+        base + entry addresses, deterministic, fork backend regression-free.
+        Remaining for M1: entering the child's PE — wired and reachable
+        behind `WINE_INPROC_RUN`, but running it needs per-process instancing
+        of ntdll's **PE-side loader** state (module list / DLL globals), the
+        long tail named in the design doc
 - [ ] M1 complete: `wine notepad.exe` with all fork/exec compiled out,
       single host process
 

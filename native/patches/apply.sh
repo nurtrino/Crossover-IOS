@@ -36,10 +36,15 @@ for p in "${patches[@]}"; do
             git -C "$wine" apply -R "$f" && echo "reversed: $p" \
                 || echo "skip (not applied): $p" ;;
         apply)
+            # NB: a failed apply must be loud. Silently continuing leaves the
+            # tree half-patched, which looks like "the work vanished".
             if git -C "$wine" apply --reverse --check "$f" 2>/dev/null; then
                 echo "skip (already applied): $p"
+            elif git -C "$wine" apply "$f"; then
+                echo "applied: $p"
             else
-                git -C "$wine" apply "$f" && echo "applied: $p"
+                echo "FAIL (does not apply): $p" >&2
+                exit 1
             fi ;;
     esac
 done

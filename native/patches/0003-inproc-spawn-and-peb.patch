@@ -1,5 +1,201 @@
+diff --git a/dlls/ntdll/unix/env.c b/dlls/ntdll/unix/env.c
+index 0fb7c59e..fd155c7c 100644
+--- a/dlls/ntdll/unix/env.c
++++ b/dlls/ntdll/unix/env.c
+@@ -1826,18 +1826,24 @@ static void *build_wow64_parameters( const RTL_USER_PROCESS_PARAMETERS *params )
+  */
+ static void init_peb( RTL_USER_PROCESS_PARAMETERS *params, void *module )
+ {
++    /* 0003b/e: write the *calling* process's PEB and image info — identical to
++     * the globals for the primary process, the child's own for an in-process
++     * child (docs/DESIGN-0003-inproc-spawn.md) */
++    PEB *peb = current_peb();
++    const SECTION_IMAGE_INFORMATION *image_info = current_image_info();
++
+     peb->ImageBaseAddress           = module;
+     peb->ProcessParameters          = params;
+     peb->OSMajorVersion             = 10;
+     peb->OSMinorVersion             = 0;
+     peb->OSBuildNumber              = 19045;
+     peb->OSPlatformId               = VER_PLATFORM_WIN32_NT;
+-    peb->ImageSubSystem             = main_image_info.SubSystemType;
+-    peb->ImageSubSystemMajorVersion = main_image_info.MajorSubsystemVersion;
+-    peb->ImageSubSystemMinorVersion = main_image_info.MinorSubsystemVersion;
++    peb->ImageSubSystem             = image_info->SubSystemType;
++    peb->ImageSubSystemMajorVersion = image_info->MajorSubsystemVersion;
++    peb->ImageSubSystemMinorVersion = image_info->MinorSubsystemVersion;
+ 
+ #ifdef _WIN64
+-    if (!is_machine_64bit( main_image_info.Machine ))
++    if (!is_machine_64bit( image_info->Machine ))
+     {
+         NtCurrentTeb()->WowTebOffset = teb_offset;
+         NtCurrentTeb()->Tib.ExceptionList = (void *)((char *)NtCurrentTeb() + teb_offset);
+@@ -1998,7 +2004,7 @@ static RTL_USER_PROCESS_PARAMETERS *build_initial_params( void **module )
+ /*************************************************************************
+  *		init_startup_info
+  */
+-void init_startup_info(void)
++static NTSTATUS build_startup_info( SIZE_T startup_info_size, BOOL inproc )
+ {
+     WCHAR *src, *dst, *env;
+     void *module = NULL;
+@@ -2013,7 +2019,7 @@ void init_startup_info(void)
+     {
+         params = build_initial_params( &module );
+         init_peb( params, module );
+-        return;
++        return STATUS_SUCCESS;
+     }
+ 
+     info = malloc( startup_info_size );
+@@ -2027,6 +2033,16 @@ void init_startup_info(void)
+         env_size = (wine_server_reply_size( reply ) - info_size) / sizeof(WCHAR);
+     }
+     SERVER_END_REQ;
++    if (inproc && (status || !info_size || !env_size))
++    {
++        /* get_startup_info returns nothing once the server has dropped the
++         * staged info (init_process_done); without this guard env_size == 0
++         * underflows env_pos below. Fail the child, never the host. */
++        ERR( "in-process child: no startup info (status %x, info_size %lx, env_size %lx)\n",
++             status, (unsigned long)info_size, (unsigned long)env_size );
++        free( info );
++        return status ? status : STATUS_INVALID_PARAMETER;
++    }
+     assert( !status );
+ 
+     env = malloc( env_size * sizeof(WCHAR) );
+@@ -2103,15 +2119,41 @@ void init_startup_info(void)
+     free( info );
+ 
+     status = load_main_exe( &nt_name, machine, &module );
++    free( nt_name.Buffer );
+     if (!NT_SUCCESS(status))
+     {
+         MESSAGE( "wine: failed to start %s: %x\n", debugstr_us(&params->ImagePathName), status );
++        if (inproc) return status;  /* a failed child must not kill the host */
+         NtTerminateProcess( GetCurrentProcess(), status );
+     }
+-    rebuild_argv();
+-    main_wargv = build_wargv( params->ImagePathName.Buffer );
+-    free( nt_name.Buffer );
++    if (!inproc)
++    {
++        /* the unix-side argv is host-process-global; an in-process child must
++         * not clobber the parent's — its command line lives in params */
++        rebuild_argv();
++        main_wargv = build_wargv( params->ImagePathName.Buffer );
++    }
+     init_peb( params, module );
++    return STATUS_SUCCESS;
++}
++
++void init_startup_info(void)
++{
++    build_startup_info( startup_info_size, FALSE );
++}
++
++/***********************************************************************
++ *		init_startup_info_inproc
++ *
++ * Crossover-IOS fork, patch series 0003e: an in-process child fetches its own
++ * startup info from the server (the parent staged it at new_process time),
++ * builds its own RTL_USER_PROCESS_PARAMETERS, maps its own main EXE, and
++ * fills in its own PEB. Everything it touches is per-process by construction:
++ * current_peb() for the PEB and current_image_info() for the image info.
++ */
++NTSTATUS init_startup_info_inproc( SIZE_T info_size )
++{
++    return build_startup_info( info_size, TRUE );
+ }
+ 
+ 
+diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
+index cb700dd8..95d6b05f 100644
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -193,6 +193,63 @@ const char **system_dll_paths = NULL;
+ const char *user_name = NULL;
+ SECTION_IMAGE_INFORMATION main_image_info = { NULL };
+ 
++/*
++ * Crossover-IOS fork, patch series 0003e: per-pseudo-process main image info.
++ *
++ * main_image_info describes the process's main EXE (entry point, subsystem,
++ * stack sizes, machine). One address space now hosts several Windows
++ * processes, each with its own EXE, so "my process's image info" must be
++ * reached through the current PEB — the same shape as current_peb() and
++ * current_server_fd() (0003b). The primary process keeps using the global
++ * (nothing registers it), so every conversion is zero-behaviour-change today
++ * and correct for in-process children tomorrow.
++ *
++ * Guarded against a missing TEB: unlike current_peb(), this is reachable from
++ * early virtual.c paths that run before virtual_alloc_first_teb().
++ */
++#define MAX_PROC_IMAGES 64
++static struct { PEB *peb; SECTION_IMAGE_INFORMATION *info; } proc_image_infos[MAX_PROC_IMAGES];
++static pthread_mutex_t proc_image_infos_lock = PTHREAD_MUTEX_INITIALIZER;
++
++void set_process_image_info( PEB *owner, SECTION_IMAGE_INFORMATION *info )
++{
++    int free_slot = -1;
++
++    pthread_mutex_lock( &proc_image_infos_lock );
++    for (int i = 0; i < MAX_PROC_IMAGES; i++)
++    {
++        if (proc_image_infos[i].peb == owner)
++        {
++            proc_image_infos[i].peb = info ? owner : NULL;  /* NULL info unregisters */
++            proc_image_infos[i].info = info;
++            free_slot = -1;
++            break;
++        }
++        if (free_slot == -1 && !proc_image_infos[i].peb) free_slot = i;
++    }
++    if (free_slot != -1 && info)
++    {
++        proc_image_infos[free_slot].peb = owner;
++        proc_image_infos[free_slot].info = info;
++    }
++    pthread_mutex_unlock( &proc_image_infos_lock );
++}
++
++SECTION_IMAGE_INFORMATION *current_image_info(void)
++{
++    SECTION_IMAGE_INFORMATION *ret = &main_image_info;
++    TEB *teb = NtCurrentTeb();
++    PEB *cur;
++
++    if (!teb) return ret;  /* pre-first-TEB init: the global is the only one */
++    cur = (PEB *)teb->Peb;
++    pthread_mutex_lock( &proc_image_infos_lock );
++    for (int i = 0; i < MAX_PROC_IMAGES; i++)
++        if (proc_image_infos[i].peb == cur) { ret = proc_image_infos[i].info; break; }
++    pthread_mutex_unlock( &proc_image_infos_lock );
++    return ret;
++}
++
+ /* die on a fatal error; use only during initialization */
+ static void fatal_error( const char *err, ... )
+ {
+@@ -1518,12 +1575,12 @@ NTSTATUS load_main_exe( UNICODE_STRING *nt_name, USHORT load_machine, void **mod
+     SIZE_T size;
+     USHORT search_machine;
+ 
+-    status = open_main_image( nt_name, module, &main_image_info, loadorder, load_machine );
++    status = open_main_image( nt_name, module, current_image_info(), loadorder, load_machine );
+     if (status != STATUS_DLL_NOT_FOUND) return status;
+ 
+     /* if path is in system dir, we can load the builtin even if the file itself doesn't exist */
+     if (loadorder != LO_NATIVE && is_builtin_path( nt_name, &search_machine ))
+-        status = find_builtin_dll( nt_name, NULL, module, &size, &main_image_info, 0, 0,
++        status = find_builtin_dll( nt_name, NULL, module, &size, current_image_info(), 0, 0,
+                                    search_machine, load_machine, FALSE, 0 );
+     return status;
+ }
 diff --git a/dlls/ntdll/unix/process.c b/dlls/ntdll/unix/process.c
-index 4c2e7eba..628fc342 100644
+index 4c2e7eba..823d2611 100644
 --- a/dlls/ntdll/unix/process.c
 +++ b/dlls/ntdll/unix/process.c
 @@ -33,6 +33,7 @@
@@ -36,7 +232,7 @@ index 4c2e7eba..628fc342 100644
                  params->ConsoleHandle == CONSOLE_HANDLE_ALLOC ||
                  params->ConsoleHandle == CONSOLE_HANDLE_ALLOC_NO_WINDOW ||
                  params->ConsoleHandle == NULL)
-@@ -464,6 +468,145 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
+@@ -464,6 +468,194 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
  }
  
  
@@ -65,26 +261,61 @@ index 4c2e7eba..628fc342 100644
 +    int socketfd;
 +    NTSTATUS status;
 +
++    SIZE_T info_size = 0;
++
 +    data->pthread_id = pthread_self();
++    data->syscall_table = KeServiceDescriptorTable;
 +    pthread_setspecific( teb_key, teb );
 +
-+    status = server_init_process_inproc();
++    status = server_init_process_inproc( &info_size );
 +    if (!status)
++    {
 +        MESSAGE( "wine: in-process child attached: pid=%04x tid=%04x\n",
 +                 HandleToULong(teb->ClientId.UniqueProcess),
 +                 HandleToULong(teb->ClientId.UniqueThread) );
 +
-+    /* 0003d stops after registration: the child is a first-class process on
-+     * the shared server but runs no image yet — 0003e maps the child PE and
-+     * enters it here. Detach cleanly: closing the thread/process fds is the
-+     * same death signal a real child's exit gives the server, so the process
-+     * object is reaped and handles/waits on it complete normally. */
++        /* 0003e: the child fetches its own startup info from the server,
++         * builds its own process parameters, and maps its own main EXE into
++         * the shared address space — all through current_peb() /
++         * current_image_info(), so none of it touches the parent's state. */
++        status = init_startup_info_inproc( info_size );
++        if (!status)
++        {
++            BOOL suspend;
++
++            MESSAGE( "wine: in-process child image mapped: %s base=%p entry=%p\n",
++                     debugstr_us( &current_peb()->ProcessParameters->ImagePathName ),
++                     current_peb()->ImageBaseAddress,
++                     current_image_info()->TransferAddress );
++            /* only now may the server drop the staged startup info */
++            status = server_init_process_done_inproc( &suspend );
++        }
++        else ERR( "in-process child: failed to build startup info/image, status %x\n", status );
++    }
++
++    /* Entering the child's PE runs the PE-side loader (LdrInitializeThunk)
++     * for a second Windows process in this address space — which needs
++     * per-process instancing of ntdll's PE-side loader state, the documented
++     * long tail (docs/DESIGN-0003-inproc-spawn.md "per-process DLL globals").
++     * Gated so the tested attach+map path above cannot regress while that
++     * work proceeds. */
++    if (!status && getenv( "WINE_INPROC_RUN" ))
++    {
++        MESSAGE( "wine: in-process child entering PE (WINE_INPROC_RUN)\n" );
++        signal_start_thread( current_image_info()->TransferAddress, current_peb(), FALSE, teb );
++        /* not reached */
++    }
++
++    /* Detach cleanly: closing the thread/process fds is the same death signal
++     * a real child's exit gives the server, so the process object is reaped
++     * and handles/waits on it complete normally. */
 +    socketfd = current_server_fd();
 +    if (data->request_fd != -1) close( data->request_fd );
 +    if (data->reply_fd != -1)   close( data->reply_fd );
 +    if (data->wait_fd[0] != -1) close( data->wait_fd[0] );
 +    if (data->wait_fd[1] != -1) close( data->wait_fd[1] );
 +    set_process_server_fd( child_peb, -1 );
++    set_process_image_info( child_peb, NULL );
 +    if (socketfd != -1) close( socketfd );
 +    /* the TEB (and its kernel stack, which is this pthread's stack) is
 +     * deliberately leaked: freeing it out from under a live thread is worse.
@@ -97,6 +328,7 @@ index 4c2e7eba..628fc342 100644
 +{
 +    NTSTATUS status;
 +    PEB *child_peb;
++    SECTION_IMAGE_INFORMATION *child_image_info;
 +    TEB *teb;
 +    struct ntdll_thread_data *thread_data;
 +    pthread_t pthread_id;
@@ -119,10 +351,21 @@ index 4c2e7eba..628fc342 100644
 +        return STATUS_NO_MEMORY;
 +    }
 +    *child_peb = *current_peb();
-+    child_peb->LdrData           = NULL;  /* 0003e: per-process module list */
-+    child_peb->ProcessParameters = NULL;  /* 0003e: cloned child params */
++    child_peb->LdrData           = NULL;  /* built by the child's PE-side loader */
++    child_peb->ProcessParameters = NULL;  /* built by init_startup_info_inproc */
++
++    /* the child's own main-image info: its EXE, not the parent's */
++    child_image_info = anon_mmap_alloc( page_size, PROT_READ | PROT_WRITE );
++    if (child_image_info == MAP_FAILED)
++    {
++        munmap( child_peb, page_size );
++        close( fd );
++        return STATUS_NO_MEMORY;
++    }
++    memset( child_image_info, 0, sizeof(*child_image_info) );
 +
 +    set_process_server_fd( child_peb, fd );
++    set_process_image_info( child_peb, child_image_info );
 +
 +    pthread_sigmask( SIG_BLOCK, &server_block_set, &sigset );
 +
@@ -157,6 +400,8 @@ index 4c2e7eba..628fc342 100644
 +failed:
 +    pthread_sigmask( SIG_SETMASK, &sigset, NULL );
 +    set_process_server_fd( child_peb, -1 );
++    set_process_image_info( child_peb, NULL );
++    munmap( child_image_info, page_size );
 +    munmap( child_peb, page_size );
 +    close( fd );
 +    return status;
@@ -182,7 +427,7 @@ index 4c2e7eba..628fc342 100644
  /***********************************************************************
   *           __wine_unix_spawnvp
   */
-@@ -591,7 +734,7 @@ static NTSTATUS fork_and_exec( OBJECT_ATTRIBUTES *attr, const char *unix_name, i
+@@ -591,7 +783,7 @@ static NTSTATUS fork_and_exec( OBJECT_ATTRIBUTES *attr, const char *unix_name, i
          {
              close( fd[0] );
  
@@ -191,7 +436,7 @@ index 4c2e7eba..628fc342 100644
                  params->ConsoleHandle == CONSOLE_HANDLE_ALLOC ||
                  params->ConsoleHandle == CONSOLE_HANDLE_ALLOC_NO_WINDOW ||
                  params->ConsoleHandle == NULL)
-@@ -1425,7 +1568,7 @@ NTSTATUS WINAPI NtQueryInformationProcess( HANDLE handle, PROCESSINFOCLASS class
+@@ -1425,7 +1617,7 @@ NTSTATUS WINAPI NtQueryInformationProcess( HANDLE handle, PROCESSINFOCLASS class
          len = sizeof(ULONG_PTR);
          if (size != len) return STATUS_INFO_LENGTH_MISMATCH;
          if (handle == GetCurrentProcess())
@@ -201,7 +446,7 @@ index 4c2e7eba..628fc342 100644
          {
              ULONG_PTR val = 0;
 diff --git a/dlls/ntdll/unix/server.c b/dlls/ntdll/unix/server.c
-index 258a959d..92c5d395 100644
+index 258a959d..dc52537f 100644
 --- a/dlls/ntdll/unix/server.c
 +++ b/dlls/ntdll/unix/server.c
 @@ -106,6 +106,59 @@ static int initial_cwd = -1;
@@ -303,7 +548,7 @@ index 258a959d..92c5d395 100644
              info_size         = reply->info_size;
              server_start_time = reply->server_start;
              supported_machines_count = wine_server_reply_size( reply ) / sizeof(*supported_machines);
-@@ -1758,14 +1816,103 @@ void server_init_process_done(void)
+@@ -1758,14 +1816,126 @@ void server_init_process_done(void)
      SERVER_START_REQ( init_process_done )
      {
          req->teb = wine_server_client_ptr( teb );
@@ -335,7 +580,7 @@ index 258a959d..92c5d395 100644
 + * path this returns errors instead of calling fatal_error(): a failed child
 + * attach must not take down the host.
 + */
-+NTSTATUS server_init_process_inproc(void)
++NTSTATUS server_init_process_inproc( SIZE_T *info_size )
 +{
 +    struct ntdll_thread_data *data = ntdll_get_thread_data();
 +    obj_handle_t version = 0;
@@ -344,6 +589,8 @@ index 258a959d..92c5d395 100644
 +    unsigned int status;
 +    int ret, reply_pipe;
 +    DWORD pid = 0, tid = 0, session_id = 0;
++
++    *info_size = 0;
 +
 +    /* The server queued the protocol version + this thread's request pipe on
 +     * the process socket when the parent's new_thread request created the
@@ -374,6 +621,7 @@ index 258a959d..92c5d395 100644
 +            tid           = reply->tid;
 +            session_id    = reply->session_id;
 +            inproc_device = reply->inproc_device;
++            *info_size    = reply->info_size;  /* the child's own startup info */
 +        }
 +    }
 +    SERVER_END_REQ;
@@ -395,13 +643,33 @@ index 258a959d..92c5d395 100644
 +
 +    current_peb()->SessionId = session_id;
 +    set_thread_id( NtCurrentTeb(), pid, tid );
++    return STATUS_SUCCESS;
++}
 +
-+    /* releases the parent blocked on process_info in NtCreateUserProcess */
++
++/***********************************************************************
++ *           server_init_process_done_inproc
++ *
++ * Crossover-IOS fork 0003e: the in-process child's init_process_done.
++ *
++ * Split from server_init_process_inproc deliberately: init_process_done makes
++ * the server drop the process's staged startup info (server/process.c,
++ * set_process_startup_state), so it MUST come after the child has fetched it
++ * with get_startup_info — the same order the normal loader uses
++ * (server_init_process -> init_startup_info -> server_init_process_done).
++ * Sending it releases the parent blocked on process_info in
++ * NtCreateUserProcess.
++ */
++NTSTATUS server_init_process_done_inproc( BOOL *suspend )
++{
++    unsigned int status;
++
 +    SERVER_START_REQ( init_process_done )
 +    {
 +        req->teb = wine_server_client_ptr( NtCurrentTeb() );
 +        req->peb = wine_server_client_ptr( current_peb() );
 +        status = wine_server_call( req );
++        *suspend = reply->suspend;
 +    }
 +    SERVER_END_REQ;
 +    if (status) ERR( "in-process child: init_process_done failed, status %x\n", status );
@@ -409,7 +677,7 @@ index 258a959d..92c5d395 100644
  }
  
  
-@@ -1952,7 +2099,7 @@ NTSTATUS WINAPI NtClose( HANDLE handle )
+@@ -1952,7 +2122,7 @@ NTSTATUS WINAPI NtClose( HANDLE handle )
      if (fd != -1) close( fd );
  
      if (ret != STATUS_INVALID_HANDLE || !handle) return ret;
@@ -568,10 +836,20 @@ index 24cd0587..fff5fb30 100644
                  }
              }
 diff --git a/dlls/ntdll/unix/unix_private.h b/dlls/ntdll/unix/unix_private.h
-index 3932b175..90d79624 100644
+index 3932b175..26d18ae3 100644
 --- a/dlls/ntdll/unix/unix_private.h
 +++ b/dlls/ntdll/unix/unix_private.h
-@@ -186,6 +186,27 @@ extern const char **dll_paths;
+@@ -75,6 +75,9 @@ static inline TEB64 *NtCurrentTeb64(void) { return (TEB64 *)NtCurrentTeb()->GdiB
+ extern WOW_PEB *wow_peb;
+ extern ULONG_PTR user_space_wow_limit;
+ extern SECTION_IMAGE_INFORMATION main_image_info;
++/* Crossover-IOS fork 0003e: per-pseudo-process main image info */
++extern void set_process_image_info( PEB *owner, SECTION_IMAGE_INFORMATION *info );
++extern SECTION_IMAGE_INFORMATION *current_image_info(void);
+ 
+ static inline WOW_TEB *get_wow_teb( TEB *teb )
+ {
+@@ -186,6 +189,27 @@ extern const char **dll_paths;
  extern const char **system_dll_paths;
  extern pthread_key_t teb_key;
  extern PEB *peb;
@@ -599,14 +877,40 @@ index 3932b175..90d79624 100644
  extern USHORT *uctable;
  extern USHORT *lctable;
  extern SIZE_T startup_info_size;
-@@ -233,6 +254,10 @@ extern unsigned int server_queue_process_apc( HANDLE process, const union apc_ca
+@@ -206,6 +230,8 @@ extern struct _KUSER_SHARED_DATA *user_shared_data;
+ 
+ extern void init_environment(void);
+ extern void init_startup_info(void);
++/* Crossover-IOS fork 0003e: in-process child startup info + image */
++extern NTSTATUS init_startup_info_inproc( SIZE_T info_size );
+ extern void *create_startup_info( const UNICODE_STRING *nt_image, ULONG process_flags,
+                                   const RTL_USER_PROCESS_PARAMETERS *params,
+                                   const struct pe_image_info *pe_info, DWORD *info_size );
+@@ -233,6 +259,11 @@ extern unsigned int server_queue_process_apc( HANDLE process, const union apc_ca
  extern int server_get_unix_fd( HANDLE handle, unsigned int wanted_access, int *unix_fd,
                                 int *needs_close, enum server_fd_type *type, unsigned int *options );
  extern int wine_server_receive_fd( obj_handle_t *handle );
 +/* Crossover-IOS fork 0003b/d: per-pseudo-process server connection */
 +extern void set_process_server_fd( PEB *owner, int fd );
 +extern int current_server_fd(void);
-+extern NTSTATUS server_init_process_inproc(void);
++extern NTSTATUS server_init_process_inproc( SIZE_T *info_size );
++extern NTSTATUS server_init_process_done_inproc( BOOL *suspend );
  extern void process_exit_wrapper( int status ) DECLSPEC_NORETURN;
  extern size_t server_init_process(void);
  extern void server_init_process_done(void);
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index 111849dc..e747471d 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -4345,8 +4345,9 @@ NTSTATUS virtual_alloc_thread_stack( INITIAL_TEB *stack, ULONG_PTR limit_low, UL
+     sigset_t sigset;
+     SIZE_T size;
+ 
+-    if (!reserve_size) reserve_size = main_image_info.MaximumStackSize;
+-    if (!commit_size) commit_size = main_image_info.CommittedStackSize;
++    /* 0003e: the stack defaults come from the calling process's own EXE */
++    if (!reserve_size) reserve_size = current_image_info()->MaximumStackSize;
++    if (!commit_size) commit_size = current_image_info()->CommittedStackSize;
+ 
+     size = max( reserve_size, commit_size );
+     if (size < 1024 * 1024) size = 1024 * 1024;  /* Xlib needs a large stack */

@@ -256,6 +256,56 @@ in-process child that pid is the whole host. Voluntary child exit never hits
 it, but `NtTerminateProcess` of an in-process child from outside will need a
 server-side notion of in-process processes (or a sentinel unix_pid).
 
+## Status: 0003e landed (2026-08-10) — the child owns its startup and image
+
+The third entangled global is virtualized and the child now stands up its own
+Windows-process state:
+
+- **`main_image_info`** → `current_image_info()` (`loader.c`), a PEB-keyed
+  registry in the same shape as `current_server_fd()`. Unlike `current_peb()`
+  it guards against a missing TEB, because early `virtual.c` paths reach it
+  before `virtual_alloc_first_teb()`. Converted on the child's path:
+  `load_main_exe`'s two writes, `init_peb`'s reads, and the thread-stack
+  defaults. Left global (documented): the one-time `load_wow64_ntdll`, the
+  arm64ec/`signal_arm64` machine lookups, and the wow64 limit calculation —
+  none run for an in-process child.
+- **`init_peb`** now writes `current_peb()`, so the child fills in *its* PEB.
+- **`build_startup_info( info_size, inproc )`** — `init_startup_info()` is a
+  thin wrapper over it, and `init_startup_info_inproc()` is the child's entry.
+  The child skips `rebuild_argv()`/`main_wargv` (host-process-global; its
+  command line lives in its own params) and returns errors instead of calling
+  `NtTerminateProcess`, so a failed child never kills the host.
+
+**The ordering bug this uncovered** (the one real defect found): the child
+originally sent `init_process_done` inside its attach, *before* fetching
+startup info. `set_process_startup_state()` releases `process->startup_info`,
+so the later `get_startup_info` returned an empty reply — and
+`env_pos = env_size - 1` underflowed to `SIZE_MAX`, segfaulting the child.
+Fixed by splitting `server_init_process_done_inproc()` out and calling it
+after the image is mapped, matching the normal loader's order
+(`server_init_process` → `init_startup_info` → `server_init_process_done`).
+A guard now turns an empty startup-info reply into a clean child-only failure
+instead of a wild pointer walk.
+
+Evidence (`spawn_seam_test.sh`, deterministic across runs): both of wineboot's
+children attach in-process **and** map their own main image —
+`L"C:\windows\system32\wineboot.exe"` with real base and entry addresses — and
+the server's `-d1` trace still counts 3 handshakes. Fork backend unchanged.
+
+### What is genuinely left for M1
+
+Entering the child's PE. The jump is wired and reachable behind
+`WINE_INPROC_RUN` (`signal_start_thread( current_image_info()->TransferAddress,
+current_peb(), FALSE, teb )`); it runs without destabilizing the host but the
+child produces nothing, because entering the image runs `LdrInitializeThunk` —
+ntdll's **PE-side** loader — for a second Windows process in one address
+space. The PE side reads `NtCurrentTeb()->Peb->LdrData`, so the child's module
+list is per-process for free, but the PE-side loader's own statics (module
+hash table, load counts, per-DLL init state) still alias across
+pseudo-processes. That is the "per-process DLL globals" long tail in Risks
+below, now the single remaining blocker rather than one of four. It is kept
+behind a flag so the tested attach+map path cannot regress while it proceeds.
+
 ## Risks / open questions
 
 - **Per-process DLL globals.** DLLs written assuming one process per address
