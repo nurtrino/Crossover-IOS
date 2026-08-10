@@ -1,8 +1,16 @@
 diff --git a/dlls/ntdll/unix/process.c b/dlls/ntdll/unix/process.c
-index 4c2e7eb..8978269 100644
+index 4c2e7eba..628fc342 100644
 --- a/dlls/ntdll/unix/process.c
 +++ b/dlls/ntdll/unix/process.c
-@@ -398,10 +398,13 @@ static BOOL is_unix_console_handle( HANDLE handle )
+@@ -33,6 +33,7 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include <time.h>
++#include <sys/mman.h>
+ #include <sys/socket.h>
+ #include <sys/time.h>
+ #ifdef HAVE_SYS_TIMES_H
+@@ -398,10 +399,13 @@ static BOOL is_unix_console_handle( HANDLE handle )
  
  
  /***********************************************************************
@@ -19,7 +27,7 @@ index 4c2e7eb..8978269 100644
  {
      NTSTATUS status = STATUS_SUCCESS;
      int stdin_fd = -1, stdout_fd = -1;
-@@ -420,7 +423,7 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
+@@ -420,7 +424,7 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
      {
          if (!(pid = fork()))  /* grandchild */
          {
@@ -28,7 +36,7 @@ index 4c2e7eb..8978269 100644
                  params->ConsoleHandle == CONSOLE_HANDLE_ALLOC ||
                  params->ConsoleHandle == CONSOLE_HANDLE_ALLOC_NO_WINDOW ||
                  params->ConsoleHandle == NULL)
-@@ -464,6 +467,49 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
+@@ -464,6 +468,145 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
  }
  
  
@@ -49,13 +57,109 @@ index 4c2e7eb..8978269 100644
 + * docs/DESIGN-0003-inproc-spawn.md. Until they land this backend is a wired
 + * but unimplemented seam.
 + */
++static void *inproc_process_thread( void *arg )
++{
++    TEB *teb = arg;
++    struct ntdll_thread_data *data = (struct ntdll_thread_data *)&teb->GdiTebBatch;
++    PEB *child_peb = teb->Peb;
++    int socketfd;
++    NTSTATUS status;
++
++    data->pthread_id = pthread_self();
++    pthread_setspecific( teb_key, teb );
++
++    status = server_init_process_inproc();
++    if (!status)
++        MESSAGE( "wine: in-process child attached: pid=%04x tid=%04x\n",
++                 HandleToULong(teb->ClientId.UniqueProcess),
++                 HandleToULong(teb->ClientId.UniqueThread) );
++
++    /* 0003d stops after registration: the child is a first-class process on
++     * the shared server but runs no image yet — 0003e maps the child PE and
++     * enters it here. Detach cleanly: closing the thread/process fds is the
++     * same death signal a real child's exit gives the server, so the process
++     * object is reaped and handles/waits on it complete normally. */
++    socketfd = current_server_fd();
++    if (data->request_fd != -1) close( data->request_fd );
++    if (data->reply_fd != -1)   close( data->reply_fd );
++    if (data->wait_fd[0] != -1) close( data->wait_fd[0] );
++    if (data->wait_fd[1] != -1) close( data->wait_fd[1] );
++    set_process_server_fd( child_peb, -1 );
++    if (socketfd != -1) close( socketfd );
++    /* the TEB (and its kernel stack, which is this pthread's stack) is
++     * deliberately leaked: freeing it out from under a live thread is worse.
++     * NtTerminateProcess-grade unwind is tracked in docs/NATIVE_PORT.md. */
++    return NULL;
++}
++
 +static NTSTATUS spawn_process_inproc( const RTL_USER_PROCESS_PARAMETERS *params, int socketfd,
 +                                      int unixdir, char *winedebug, const struct pe_image_info *pe_info )
 +{
-+    /* 0003a: seam only. 0003c (image map) + 0003d (in-proc init) fill this in. */
-+    ERR( "in-process spawn (WINE_INPROC_SPAWN) not yet implemented; "
-+         "see docs/DESIGN-0003-inproc-spawn.md\n" );
-+    return STATUS_NOT_IMPLEMENTED;
++    NTSTATUS status;
++    PEB *child_peb;
++    TEB *teb;
++    struct ntdll_thread_data *thread_data;
++    pthread_t pthread_id;
++    pthread_attr_t pthread_attr;
++    sigset_t sigset;
++    int fd;
++
++    /* the caller closes socketfd once we return; the child keeps its own */
++    if ((fd = dup( socketfd )) == -1) return STATUS_TOO_MANY_OPENED_FILES;
++    fcntl( fd, F_SETFD, FD_CLOEXEC );
++
++    /* Child PEB: template-copy the parent's, then reset what is genuinely
++     * per-process. The shared fields (session/config data initialized by the
++     * shared ntdll) stay valid by construction; LdrData and ProcessParameters
++     * become the child's own when 0003e maps its image and clones params. */
++    child_peb = anon_mmap_alloc( page_size, PROT_READ | PROT_WRITE );
++    if (child_peb == MAP_FAILED)
++    {
++        close( fd );
++        return STATUS_NO_MEMORY;
++    }
++    *child_peb = *current_peb();
++    child_peb->LdrData           = NULL;  /* 0003e: per-process module list */
++    child_peb->ProcessParameters = NULL;  /* 0003e: cloned child params */
++
++    set_process_server_fd( child_peb, fd );
++
++    pthread_sigmask( SIG_BLOCK, &server_block_set, &sigset );
++
++    if ((status = virtual_alloc_teb( &teb ))) goto failed;
++    teb->Peb = child_peb;  /* the thread's process identity: current_peb() now
++                            * resolves to the child for this thread */
++    if ((status = init_thread_stack( teb, 0, 0, 0 )))
++    {
++        virtual_free_teb( teb );
++        goto failed;
++    }
++    thread_data = (struct ntdll_thread_data *)&teb->GdiTebBatch;
++    thread_data->request_fd = -1;  /* received from the server socket by the child */
++
++    pthread_attr_init( &pthread_attr );
++    pthread_attr_setstack( &pthread_attr, thread_data->kernel_stack, kernel_stack_size );
++    pthread_attr_setguardsize( &pthread_attr, 0 );
++    pthread_attr_setscope( &pthread_attr, PTHREAD_SCOPE_SYSTEM );
++    if (pthread_create( &pthread_id, &pthread_attr, inproc_process_thread, teb ))
++    {
++        pthread_attr_destroy( &pthread_attr );
++        virtual_free_teb( teb );
++        status = STATUS_NO_MEMORY;
++        goto failed;
++    }
++    pthread_attr_destroy( &pthread_attr );
++    pthread_sigmask( SIG_SETMASK, &sigset, NULL );
++
++    TRACE( "in-process child spawned, socket %d -> %d\n", socketfd, fd );
++    return STATUS_SUCCESS;
++
++failed:
++    pthread_sigmask( SIG_SETMASK, &sigset, NULL );
++    set_process_server_fd( child_peb, -1 );
++    munmap( child_peb, page_size );
++    close( fd );
++    return status;
 +}
 +
 +
@@ -78,7 +182,7 @@ index 4c2e7eb..8978269 100644
  /***********************************************************************
   *           __wine_unix_spawnvp
   */
-@@ -591,7 +637,7 @@ static NTSTATUS fork_and_exec( OBJECT_ATTRIBUTES *attr, const char *unix_name, i
+@@ -591,7 +734,7 @@ static NTSTATUS fork_and_exec( OBJECT_ATTRIBUTES *attr, const char *unix_name, i
          {
              close( fd[0] );
  
@@ -87,7 +191,7 @@ index 4c2e7eb..8978269 100644
                  params->ConsoleHandle == CONSOLE_HANDLE_ALLOC ||
                  params->ConsoleHandle == CONSOLE_HANDLE_ALLOC_NO_WINDOW ||
                  params->ConsoleHandle == NULL)
-@@ -1425,7 +1471,7 @@ NTSTATUS WINAPI NtQueryInformationProcess( HANDLE handle, PROCESSINFOCLASS class
+@@ -1425,7 +1568,7 @@ NTSTATUS WINAPI NtQueryInformationProcess( HANDLE handle, PROCESSINFOCLASS class
          len = sizeof(ULONG_PTR);
          if (size != len) return STATUS_INFO_LENGTH_MISMATCH;
          if (handle == GetCurrentProcess())
@@ -97,10 +201,10 @@ index 4c2e7eb..8978269 100644
          {
              ULONG_PTR val = 0;
 diff --git a/dlls/ntdll/unix/server.c b/dlls/ntdll/unix/server.c
-index 258a959..dcf3317 100644
+index 258a959d..92c5d395 100644
 --- a/dlls/ntdll/unix/server.c
 +++ b/dlls/ntdll/unix/server.c
-@@ -106,6 +106,48 @@ static int initial_cwd = -1;
+@@ -106,6 +106,59 @@ static int initial_cwd = -1;
  static pid_t server_pid;
  pthread_mutex_t fd_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
  
@@ -120,27 +224,38 @@ index 258a959..dcf3317 100644
 +static struct { PEB *peb; int fd; } proc_server_fds[MAX_PROC_FDS];
 +static pthread_mutex_t proc_server_fds_lock = PTHREAD_MUTEX_INITIALIZER;
 +
-+static void set_process_server_fd( PEB *owner, int fd )
++void set_process_server_fd( PEB *owner, int fd )
 +{
++    int free_slot = -1;
++
 +    pthread_mutex_lock( &proc_server_fds_lock );
 +    for (int i = 0; i < MAX_PROC_FDS; i++)
 +    {
-+        if (proc_server_fds[i].peb == owner || !proc_server_fds[i].peb)
++        if (proc_server_fds[i].peb == owner)
 +        {
-+            proc_server_fds[i].peb = owner;
++            /* fd == -1 unregisters (in-process child exit); leave no hole
++             * semantics to worry about — the lookup scans every slot */
++            proc_server_fds[i].peb = (fd == -1) ? NULL : owner;
 +            proc_server_fds[i].fd = fd;
++            free_slot = -1;
 +            break;
 +        }
++        if (free_slot == -1 && !proc_server_fds[i].peb) free_slot = i;
++    }
++    if (free_slot != -1 && fd != -1)
++    {
++        proc_server_fds[free_slot].peb = owner;
++        proc_server_fds[free_slot].fd = fd;
 +    }
 +    pthread_mutex_unlock( &proc_server_fds_lock );
 +}
 +
-+static int current_server_fd(void)
++int current_server_fd(void)
 +{
 +    PEB *cur = current_peb();
 +    int fd = fd_socket;  /* fallback for early init / primary process */
 +    pthread_mutex_lock( &proc_server_fds_lock );
-+    for (int i = 0; i < MAX_PROC_FDS && proc_server_fds[i].peb; i++)
++    for (int i = 0; i < MAX_PROC_FDS; i++)
 +        if (proc_server_fds[i].peb == cur) { fd = proc_server_fds[i].fd; break; }
 +    pthread_mutex_unlock( &proc_server_fds_lock );
 +    return fd;
@@ -149,7 +264,7 @@ index 258a959..dcf3317 100644
  /* atomically exchange a 64-bit value */
  static inline LONG64 interlocked_xchg64( LONG64 *dest, LONG64 val )
  {
-@@ -971,7 +1013,7 @@ void CDECL wine_server_send_fd( int fd )
+@@ -971,7 +1024,7 @@ void CDECL wine_server_send_fd( int fd )
  
      for (;;)
      {
@@ -158,7 +273,7 @@ index 258a959..dcf3317 100644
          if (ret >= 0) server_protocol_error( "partial write %d\n", ret );
          if (errno == EINTR) continue;
          if (errno == EPIPE) abort_thread(0);
-@@ -1005,7 +1047,7 @@ int wine_server_receive_fd( obj_handle_t *handle )
+@@ -1005,7 +1058,7 @@ int wine_server_receive_fd( obj_handle_t *handle )
  
      for (;;)
      {
@@ -167,7 +282,7 @@ index 258a959..dcf3317 100644
          {
              struct cmsghdr *cmsg;
              for (cmsg = CMSG_FIRSTHDR( &msghdr ); cmsg; cmsg = CMSG_NXTHDR( &msghdr, cmsg ))
-@@ -1622,6 +1664,11 @@ size_t server_init_process(void)
+@@ -1622,6 +1675,11 @@ size_t server_init_process(void)
          fd_socket = server_connect();
      }
  
@@ -179,7 +294,7 @@ index 258a959..dcf3317 100644
      /* setup the signal mask */
      sigemptyset( &server_block_set );
      sigaddset( &server_block_set, SIGALRM );
-@@ -1677,7 +1724,7 @@ size_t server_init_process(void)
+@@ -1677,7 +1735,7 @@ size_t server_init_process(void)
              obj_handle_t handle;
              pid               = reply->pid;
              tid               = reply->tid;
@@ -188,7 +303,7 @@ index 258a959..dcf3317 100644
              info_size         = reply->info_size;
              server_start_time = reply->server_start;
              supported_machines_count = wine_server_reply_size( reply ) / sizeof(*supported_machines);
-@@ -1758,14 +1805,14 @@ void server_init_process_done(void)
+@@ -1758,14 +1816,103 @@ void server_init_process_done(void)
      SERVER_START_REQ( init_process_done )
      {
          req->teb = wine_server_client_ptr( teb );
@@ -202,10 +317,99 @@ index 258a959..dcf3317 100644
      assert( !status );
 -    signal_start_thread( main_image_info.TransferAddress, peb, suspend, NtCurrentTeb() );
 +    signal_start_thread( main_image_info.TransferAddress, current_peb(), suspend, NtCurrentTeb() );
++}
++
++
++/***********************************************************************
++ *           server_init_process_inproc
++ *
++ * Crossover-IOS fork, patch series 0003d: first-thread handshake for an
++ * in-process child (docs/DESIGN-0003-inproc-spawn.md). Runs on the child
++ * pseudo-process's initial thread, whose TEB->Peb is the child PEB and whose
++ * server socket was registered with set_process_server_fd() — so every
++ * send/receive below rides the child's own connection.
++ *
++ * This is the per-process tail of server_init_process() only: the one-time
++ * global init (environment, cpu info, machine tables, signal masks) already
++ * ran in the shared ntdll and must not run again. Unlike the primary-process
++ * path this returns errors instead of calling fatal_error(): a failed child
++ * attach must not take down the host.
++ */
++NTSTATUS server_init_process_inproc(void)
++{
++    struct ntdll_thread_data *data = ntdll_get_thread_data();
++    obj_handle_t version = 0;
++    unsigned short machines[8];
++    obj_handle_t inproc_device = 0;
++    unsigned int status;
++    int ret, reply_pipe;
++    DWORD pid = 0, tid = 0, session_id = 0;
++
++    /* The server queued the protocol version + this thread's request pipe on
++     * the process socket when the parent's new_thread request created the
++     * first thread (server/thread.c: create_thread, request_fd == -1). */
++    data->request_fd = wine_server_receive_fd( &version );
++    if (data->request_fd == -1 || version != SERVER_PROTOCOL_VERSION)
++    {
++        ERR( "in-process child: bad first-thread handshake (fd %d, version %d/%d)\n",
++             data->request_fd, (int)version, SERVER_PROTOCOL_VERSION );
++        return STATUS_INTERNAL_ERROR;
++    }
++
++    reply_pipe = init_thread_pipe();
++
++    SERVER_START_REQ( init_first_thread )
++    {
++        req->unix_pid    = getpid();  /* shared with every pseudo-process; see design doc risks */
++        req->unix_tid    = get_unix_tid();
++        req->reply_fd    = reply_pipe;
++        req->wait_fd     = data->wait_fd[1];
++        req->debug_level = (TRACE_ON(server) != 0);
++        /* reply into a local buffer: the machine list is a property of the
++         * shared ntdll and is already initialized — leave the globals alone */
++        wine_server_set_reply( req, machines, sizeof(machines) );
++        if (!(ret = wine_server_call( req )))
++        {
++            pid           = reply->pid;
++            tid           = reply->tid;
++            session_id    = reply->session_id;
++            inproc_device = reply->inproc_device;
++        }
++    }
++    SERVER_END_REQ;
++    close( reply_pipe );
++    if (ret)
++    {
++        ERR( "in-process child: init_first_thread failed, status %x\n", ret );
++        return ret;
++    }
++
++    if (inproc_device)
++    {
++        /* consume the per-process device fd queued behind the reply; the
++         * shared ntdll already holds one for the address space */
++        obj_handle_t handle;
++        int fd = wine_server_receive_fd( &handle );
++        if (fd != -1) close( fd );
++    }
++
++    current_peb()->SessionId = session_id;
++    set_thread_id( NtCurrentTeb(), pid, tid );
++
++    /* releases the parent blocked on process_info in NtCreateUserProcess */
++    SERVER_START_REQ( init_process_done )
++    {
++        req->teb = wine_server_client_ptr( NtCurrentTeb() );
++        req->peb = wine_server_client_ptr( current_peb() );
++        status = wine_server_call( req );
++    }
++    SERVER_END_REQ;
++    if (status) ERR( "in-process child: init_process_done failed, status %x\n", status );
++    return status;
  }
  
  
-@@ -1952,7 +1999,7 @@ NTSTATUS WINAPI NtClose( HANDLE handle )
+@@ -1952,7 +2099,7 @@ NTSTATUS WINAPI NtClose( HANDLE handle )
      if (fd != -1) close( fd );
  
      if (ret != STATUS_INVALID_HANDLE || !handle) return ret;
@@ -215,7 +419,7 @@ index 258a959..dcf3317 100644
      {
          NtCurrentTeb()->ExceptionCode = ret;
 diff --git a/dlls/ntdll/unix/system.c b/dlls/ntdll/unix/system.c
-index 350bcea..a7d927a 100644
+index 350bcea4..a7d927a4 100644
 --- a/dlls/ntdll/unix/system.c
 +++ b/dlls/ntdll/unix/system.c
 @@ -1265,7 +1265,7 @@ static NTSTATUS create_logical_proc_info(void)
@@ -326,7 +530,7 @@ index 350bcea..a7d927a 100644
  #if defined(linux)
          {
 diff --git a/dlls/ntdll/unix/thread.c b/dlls/ntdll/unix/thread.c
-index 24cd058..fff5fb3 100644
+index 24cd0587..fff5fb30 100644
 --- a/dlls/ntdll/unix/thread.c
 +++ b/dlls/ntdll/unix/thread.c
 @@ -1556,7 +1556,7 @@ NTSTATUS send_debug_event( EXCEPTION_RECORD *rec, CONTEXT *context, BOOL first_c
@@ -364,7 +568,7 @@ index 24cd058..fff5fb3 100644
                  }
              }
 diff --git a/dlls/ntdll/unix/unix_private.h b/dlls/ntdll/unix/unix_private.h
-index 3932b17..be64ec3 100644
+index 3932b175..90d79624 100644
 --- a/dlls/ntdll/unix/unix_private.h
 +++ b/dlls/ntdll/unix/unix_private.h
 @@ -186,6 +186,27 @@ extern const char **dll_paths;
@@ -395,3 +599,14 @@ index 3932b17..be64ec3 100644
  extern USHORT *uctable;
  extern USHORT *lctable;
  extern SIZE_T startup_info_size;
+@@ -233,6 +254,10 @@ extern unsigned int server_queue_process_apc( HANDLE process, const union apc_ca
+ extern int server_get_unix_fd( HANDLE handle, unsigned int wanted_access, int *unix_fd,
+                                int *needs_close, enum server_fd_type *type, unsigned int *options );
+ extern int wine_server_receive_fd( obj_handle_t *handle );
++/* Crossover-IOS fork 0003b/d: per-pseudo-process server connection */
++extern void set_process_server_fd( PEB *owner, int fd );
++extern int current_server_fd(void);
++extern NTSTATUS server_init_process_inproc(void);
+ extern void process_exit_wrapper( int status ) DECLSPEC_NORETURN;
+ extern size_t server_init_process(void);
+ extern void server_init_process_done(void);

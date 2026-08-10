@@ -57,10 +57,17 @@ Every phase ends with something demonstrable.
     - [x] **`peb`** → `current_peb()` (hot path converted, TEB->Peb hook)
     - [x] **`fd_socket`** → `current_server_fd()` (PEB-keyed per-process
           registry) — both zero-regression, suite green
-  - Remaining: the attach as one tested unit (spec in the design doc):
-    - [ ] child PEB/TEB allocation + install on the new thread
-    - [ ] 0003d: child `init_first_thread` on the handed socket
-    - [ ] 0003e: map+run the child PE → end-to-end in-process `CreateProcess`
+  - [x] **0003d: the in-process attach** — child PEB/TEB allocation + install
+        on a new thread, child `init_first_thread` + `init_process_done` on
+        the handed socket. `CreateProcess` under `WINE_INPROC_SPAWN` now
+        launches the child as a thread group in the same host process; the
+        parent's `CreateProcess` succeeds and the server's own `-d1` trace
+        counts the in-process children as first-class processes
+        (`spawn_seam_test.sh`: 2 children attach, 3 handshakes, deterministic;
+        zero regression on the fork backend)
+    - [ ] 0003e: map+run the child PE (per-process module list, cloned
+          params, `main_image_info`, entry via `signal_start_thread`) →
+          end-to-end in-process `CreateProcess`
 - [ ] M1 complete: `wine notepad.exe` with all fork/exec compiled out,
       single host process
 

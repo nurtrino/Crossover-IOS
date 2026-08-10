@@ -125,6 +125,19 @@ concurrently — run against `wineserver` running purely as a **thread** in the
 host process, with no forked server anywhere. That is the server half of
 milestone M1.
 
+### 005 — in-process child attach, no fork (PASSING)
+
+Patch 0003d: `spawn_process_inproc` replaces fork+exec for `CreateProcess`
+under `WINE_INPROC_SPAWN`. The child becomes a thread group in the parent's
+host process: fresh PEB (template-copied) + TEB, its own server socket in the
+PEB-keyed registry, and the first-thread handshake (`init_first_thread` +
+`init_process_done`) run on the handed socket by `server_init_process_inproc`.
+`spawn_seam_test.sh` asserts it with server-side evidence: wineboot's two
+child processes attach in-process and the server's `-d1` trace counts their
+handshakes (3 = primary + 2 children), deterministic across runs; the fork
+backend stays regression-free. The child does not yet run its PE image —
+that is 0003e, the end-to-end finish of M1's client half.
+
 ### Next: client-side process elimination
 
 What remains for full M1 (`wine notepad.exe` with *all* fork/exec compiled

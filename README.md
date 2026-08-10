@@ -40,12 +40,16 @@ Real, tested results (host-first on Linux, against genuine wine-11.0):
   **0002** forbids the client from forking a server. Both round-trip clean.
 - `CrossoverPad/` — SwiftUI bottle-manager scaffold (mock engine today).
 
-**What's left for M1** — the client half: load ntdll + the PE loader
-in-process and replace `CreateProcess`→`exec` with an in-address-space spawn
-(patch series **0003**, scoped in [`docs/NATIVE_PORT.md`](docs/NATIVE_PORT.md)).
-This is the large centerpiece. iOS bring-up (M2) additionally needs a macOS +
-iOS SDK toolchain to cross-compile for ARM64. See
-[`docs/ROADMAP.md`](docs/ROADMAP.md).
+**Client half in progress — the in-process attach works (0003d).** Under
+`WINE_INPROC_SPAWN`, `CreateProcess` now launches the child as a thread group
+in the same host process — no fork/exec: fresh PEB/TEB, own server socket,
+`init_first_thread` + `init_process_done` on the handed socket, counted by
+the server as a first-class process (hard `-d1`-trace evidence, zero
+regression on the fork backend). **What's left for M1** is **0003e**: map the
+child's PE and run it (per-process module list, cloned params, entry jump) —
+scoped in [`docs/DESIGN-0003-inproc-spawn.md`](docs/DESIGN-0003-inproc-spawn.md).
+iOS bring-up (M2) additionally needs a macOS + iOS SDK toolchain to
+cross-compile for ARM64. See [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Building
 

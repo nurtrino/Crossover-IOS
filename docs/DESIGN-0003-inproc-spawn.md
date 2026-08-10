@@ -217,6 +217,45 @@ are done; this last chunk is the genuinely hard, iteration-heavy Wine-internals
 work — best done where a crashing child can be debugged interactively, not
 blind in a headless batch.
 
+## Status: 0003d landed (2026-08-10) — the attach works
+
+The registration half of the attach is implemented and green:
+
+- `server_init_process_inproc()` (server.c) — the stripped per-process tail:
+  receives the queued request fd + protocol version (the server sends them at
+  `new_thread` time, `server/thread.c: create_thread`), runs
+  `init_first_thread` and `init_process_done` on the child's own connection,
+  replying into locals so the shared ntdll's globals are untouched. Returns
+  errors instead of `fatal_error()` — a failed child attach cannot take down
+  the host, and the closed socket makes the parent's `CreateProcess` fail
+  cleanly instead of hanging.
+- `spawn_process_inproc()` (process.c) — dups the socket (the caller closes
+  its copy), template-copies the parent PEB (LdrData/ProcessParameters reset
+  for 0003e), registers the socket under the child PEB, allocates TEB + stack
+  via the existing `virtual_alloc_teb`/`init_thread_stack`, points `teb->Peb`
+  at the child PEB, and launches the bootstrap on the TEB's kernel stack —
+  the same recipe as `NtCreateThreadEx`.
+- The fd registry gained unregister (`fd == -1`) and hole-tolerant lookup so
+  children can come and go.
+
+Evidence (`spawn_seam_test.sh`, deterministic across runs): under
+`WINE_INPROC_SPAWN=1` wineboot's child `CreateProcess` calls succeed with the
+children attached from threads of the same host process, and the server's own
+`-d1` trace counts their `init_first_thread` handshakes (2 children + the
+primary = 3). The fork backend is regression-free with the flag off.
+
+What 0003d deliberately does not do: run the child's PE. The child registers,
+releases the parent, and detaches cleanly (fd close = the same death signal a
+real child's exit gives the server). The child's TEB is leaked by design — the
+kernel stack it contains is the live pthread stack; reclaiming it belongs to
+the NtTerminateProcess unwind workstream.
+
+Found while implementing, for 0003e's ledger: the server's terminate path
+(`server/process.c:632`) signals `process->unix_pid` with `kill()` — for an
+in-process child that pid is the whole host. Voluntary child exit never hits
+it, but `NtTerminateProcess` of an in-process child from outside will need a
+server-side notion of in-process processes (or a sentinel unix_pid).
+
 ## Risks / open questions
 
 - **Per-process DLL globals.** DLLs written assuming one process per address
