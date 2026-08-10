@@ -20,7 +20,17 @@ Two build knobs matter for what the suite can prove:
 - **`--without-mingw` builds Wine's DLLs as host `.so` files.** `dlopen`
   deduplicates those, so two pseudo-processes end up sharing one `kernel32`
   and its globals. Building **with** mingw produces real PE DLLs, which each
-  Windows process maps its own copy of — the isolation real processes get.
+  Windows process maps its own copy of — the isolation real processes get, and
+  the most likely fix for the remaining in-process failures (`hostname.exe`'s
+  ERROR_INVALID_HANDLE, GUI children dying under explorer).
+
+  **Blocked on this host, precisely.** `gcc-mingw-w64-x86-64` installs and
+  `configure` finds both the compiler and `x86_64-w64-mingw32-ld`
+  (`wine_cv_x86_64_crosscc=yes`), but `ac_cv_x86_64_crosscc_c99` comes back
+  **empty** — the cross compiler fails configure's C99 conformance probe, so
+  `CROSSCC` is never set and every DLL falls back to `.so`. Start there: rerun
+  that probe by hand (see `config.log`) and either satisfy it or install a
+  mingw/clang+lld toolchain that passes.
 - **`--without-x` omits `winex11.drv`**, so no GUI app can run and the M1
   notepad test cannot be executed. Keep X11 in (and run under `Xvfb`).
 
