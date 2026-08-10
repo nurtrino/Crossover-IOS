@@ -10,11 +10,22 @@ happen out-of-tree in `native/wine-build` (gitignored).
 git submodule update --init --depth 1 native/wine
 sudo apt install flex bison          # or brew equivalents
 mkdir -p native/wine-build && cd native/wine-build
-../wine/configure --enable-win64 --without-x --without-freetype \
-                  --disable-tests --without-mingw
-make -j"$(nproc)" server/wineserver
+../wine/configure --enable-win64 --disable-tests
+make -j"$(nproc)"
 cd ../wineforge && make test
 ```
+
+Two build knobs matter for what the suite can prove:
+
+- **`--without-mingw` builds Wine's DLLs as host `.so` files.** `dlopen`
+  deduplicates those, so two pseudo-processes end up sharing one `kernel32`
+  and its globals. Building **with** mingw produces real PE DLLs, which each
+  Windows process maps its own copy of — the isolation real processes get.
+- **`--without-x` omits `winex11.drv`**, so no GUI app can run and the M1
+  notepad test cannot be executed. Keep X11 in (and run under `Xvfb`).
+
+The minimal `--without-x --without-freetype --without-mingw` configuration is
+still fine for the server-side experiments (001–004).
 
 ## Experiment log
 

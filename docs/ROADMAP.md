@@ -102,7 +102,14 @@ Every phase ends with something demonstrable.
     child still takes the host down, so the backend stays opt-in. The fix is a
     private per-process image mapping per DLL (mechanic proven by `peload_test`)
 - [ ] M1 complete: `wine notepad.exe` with all fork/exec compiled out,
-      single host process
+      single host process — gate script `native/wineforge/m1_notepad_test.sh`
+      (currently FAILING; not wired into the suite). Status: the build now has
+      `winex11.drv`, and notepad runs headless under Xvfb on the fork backend;
+      as an in-process child spawned via the desktop path it exits early, root
+      cause not yet found. Also still open: DLL globals alias between
+      pseudo-processes (PE-format DLLs would fix it, but this host's mingw
+      lacks the lld/clang support `configure` needs to enable them), and there
+      is no per-pseudo-process fault containment
 
 ## Phase 3 — iOS bring-up (WS-C) → M2
 - [ ] Cross-build the fork against the iOS SDK (winelib static libs + dylibs)

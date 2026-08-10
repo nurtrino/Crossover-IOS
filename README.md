@@ -65,11 +65,14 @@ in-process and `attrib.exe` output matches the fork backend exactly.
 bootstrap runs before ntdll's PE side exists, so it deliberately falls back to
 fork, and every child after it runs in-process.
 
-**What's left for M1**: two in-process processes still share one mapping of each
-imported DLL, so DLL globals alias (the likely cause of stray invalid-handle
-failures in children); a crashing child still takes the host down; and M1's
-literal bar needs a display driver this build lacks. The in-process backend
-therefore stays opt-in. Details in
+**What's left for M1** (gate script: `native/wineforge/m1_notepad_test.sh`,
+currently failing): notepad runs headless under Xvfb on the fork backend now
+that the build includes `winex11.drv`, but exits early when the desktop path
+spawns it as an in-process child. Two in-process processes also still share one
+mapping of each imported DLL, so DLL globals alias — real PE-format DLLs would
+fix that, but enabling them needs a mingw/lld toolchain this host lacks. And a
+crashing child still takes the host down, so the in-process backend stays
+opt-in. Details in
 [`docs/DESIGN-0003-inproc-spawn.md`](docs/DESIGN-0003-inproc-spawn.md).
 iOS bring-up (M2) additionally needs a macOS + iOS SDK toolchain to
 cross-compile for ARM64. See [`docs/ROADMAP.md`](docs/ROADMAP.md).
