@@ -1,3 +1,7 @@
 [submodule "native/wine"]
 	path = native/wine
 	url = https://github.com/wine-mirror/wine.git
+	# The submodule intentionally carries the applied fork patches
+	# (native/patches/ is the tracked delta; see patches/README.md), so
+	# working-tree modifications are its normal state, not pending work.
+	ignore = dirty
