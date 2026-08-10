@@ -90,10 +90,17 @@ Every phase ends with something demonstrable.
         attach. `SkipLoaderInit` and the import gate are gone. Verified:
         nested `cmd.exe` returns exit code 7 in-process, `attrib.exe` output
         identical to the fork backend, import-free children still exact
-  - Not yet working (documented in the design doc): cold-prefix `wineboot`
-    (a tree of helpers) crashes under `WINE_INPROC_RUN`; some Win32 APIs still
-    fail in a child (`hostname.exe` → ERROR_INVALID_HANDLE); DLL data-segment
-    isolation between pseudo-processes is not yet asserted by a test
+  - [x] **0003h: bootstrap boundary** — cold-prefix creation no longer crashes.
+        Wine builds a missing prefix from inside early init, before ntdll's PE
+        side publishes `pRtlUserThreadStart`, so entering a child jumped to
+        NULL. `spawn_process` now falls back to fork when the PE side is not up
+        or `is_prefix_bootstrap` is set; a cold prefix builds end-to-end with
+        the in-process flags on (asserted). iOS must ship a prepared prefix
+  - Remaining, measured and documented: **DLL images are shared between
+    pseudo-processes** (2 processes, 1 kernel32 mapping) so DLL globals alias —
+    the likely cause of `hostname.exe`'s ERROR_INVALID_HANDLE; and a crashing
+    child still takes the host down, so the backend stays opt-in. The fix is a
+    private per-process image mapping per DLL (mechanic proven by `peload_test`)
 - [ ] M1 complete: `wine notepad.exe` with all fork/exec compiled out,
       single host process
 

@@ -18,9 +18,16 @@
 # list, loads its own imports and runs process attach. Both an import-free PE
 # (mkexe) and real DLL-importing programs are covered.
 #
-# Known gap (documented, not asserted): heavy multi-child workloads — notably
-# creating a Wine prefix from cold, which spawns a tree of wineboot helpers —
-# still crash under WINE_INPROC_RUN. Simple console programs work.
+# Also asserted: creating a Wine prefix from cold works with the in-process
+# flags on (bootstrap falls back to the fork backend, since the model needs a
+# live ntdll PE side and an initialized prefix).
+#
+# Reported, NOT asserted: whether pseudo-processes get separate mappings of
+# their imported DLLs. They currently do not — two in-process Windows processes
+# share one kernel32 image and therefore its globals, where real processes get
+# private copy-on-write data. This is the known open risk in Blocker 1 and the
+# likely cause of stray ERROR_INVALID_HANDLE failures in children (e.g.
+# hostname.exe). The measurement is printed each run so a fix becomes visible.
 set -u
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -106,4 +113,29 @@ inprocout=$(WINE_INPROC_SPAWN=1 WINE_INPROC_RUN=1 WINEPREFIX="$prefix" WINEDEBUG
     || fail "attrib output differs: fork=[$forkout] in-process=[$inprocout]"
 echo "  attrib.exe: output identical to the fork backend"
 
-echo "PASS: in-process children — import-free and DLL-importing — run and match the fork backend"
+echo "DLL mapping sharing between pseudo-processes (measured, not gated)"
+WINE_INPROC_SPAWN=1 WINE_INPROC_RUN=1 WINEPREFIX="$prefix" WINEDEBUG=+loaddll timeout 90 \
+    "$wine" "$cmd" /c cmd /c exit 7 >"$log" 2>&1
+bases=$(grep -o 'kernel32\.dll" at [0-9A-F]*' "$log" | awk '{print $3}' | sort -u | wc -l)
+procs=$(grep 'kernel32\.dll" at' "$log" | cut -d: -f1 | sort -u | wc -l)
+[ "$procs" -ge 2 ] || { cat "$log"; fail "expected >=2 pseudo-processes loading kernel32, got $procs"; }
+if [ "$bases" -ge "$procs" ]; then
+    echo "  $procs pseudo-processes, $bases distinct kernel32 mappings — isolated"
+else
+    echo "  $procs pseudo-processes, $bases distinct kernel32 mappings"
+    echo "  NOTE: DLL images are shared between pseudo-processes, so their DLL"
+    echo "        globals alias. Known open risk — docs/DESIGN-0003-inproc-spawn.md"
+fi
+
+echo "cold prefix creation works with the in-process backend enabled"
+cold="$prefix-cold"; rm -rf "$cold"
+WINE_INPROC_SPAWN=1 WINE_INPROC_RUN=1 WINEPREFIX="$cold" WINEDEBUG=-all timeout 240 \
+    "$wine" wineboot.exe >/dev/null 2>&1
+coldrc=$?
+have_k32=0; [ -e "$cold/drive_c/windows/system32/kernel32.dll" ] && have_k32=1
+WINEPREFIX="$cold" "$wineserver" -k 2>/dev/null; rm -rf "$cold"
+[ "$coldrc" = 0 ] || fail "cold-prefix wineboot returned $coldrc with the in-process backend on"
+[ "$have_k32" = 1 ] || fail "cold prefix was not populated"
+echo "  ok: prefix built from cold, rc=$coldrc"
+
+echo "PASS: in-process children run real programs; cold-prefix bootstrap unaffected"

@@ -400,7 +400,7 @@ index cb700dd8..95d6b05f 100644
      return status;
  }
 diff --git a/dlls/ntdll/unix/process.c b/dlls/ntdll/unix/process.c
-index 4c2e7eba..766f3264 100644
+index 4c2e7eba..58432823 100644
 --- a/dlls/ntdll/unix/process.c
 +++ b/dlls/ntdll/unix/process.c
 @@ -33,6 +33,7 @@
@@ -437,7 +437,7 @@ index 4c2e7eba..766f3264 100644
                  params->ConsoleHandle == CONSOLE_HANDLE_ALLOC ||
                  params->ConsoleHandle == CONSOLE_HANDLE_ALLOC_NO_WINDOW ||
                  params->ConsoleHandle == NULL)
-@@ -464,6 +468,203 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
+@@ -464,6 +468,230 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
  }
  
  
@@ -632,8 +632,35 @@ index 4c2e7eba..766f3264 100644
 +static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int socketfd,
 +                               int unixdir, char *winedebug, const struct pe_image_info *pe_info )
 +{
++    /*
++     * The in-process backend runs the child on the shared ntdll, so it needs
++     * ntdll's PE side to be initialized: the child is entered through
++     * pRtlUserThreadStart / pLdrInitializeThunk, which the PE side publishes
++     * during its own init. Prefix bootstrap spawns wineboot BEFORE that has
++     * happened (a cold prefix is created from inside early init), and entering
++     * a child then jumps to a NULL entry and takes the host down.
++     *
++     * The same applies while the prefix itself is being created
++     * (is_prefix_bootstrap): the child's loader cannot resolve system DLLs
++     * from a prefix that does not exist yet.
++     *
++     * Neither case can be served in-process, so fall back to fork rather than
++     * fail: on the host that makes cold-prefix creation work normally. These
++     * are the model's real boundary — the in-process backend needs a live
++     * ntdll PE side and an initialized prefix. iOS has no fork, so it must
++     * ship a prepared prefix; tracked in docs/DESIGN-0003-inproc-spawn.md.
++     */
 +    if (getenv( "WINE_INPROC_SPAWN" ))
-+        return spawn_process_inproc( params, socketfd, unixdir, winedebug, pe_info );
++    {
++        if (!pRtlUserThreadStart || !pLdrInitializeThunk)
++            WARN( "in-process spawn requested before ntdll's PE side is initialized; "
++                  "using the fork backend for this child\n" );
++        else if (is_prefix_bootstrap)
++            WARN( "in-process spawn requested during prefix bootstrap; "
++                  "using the fork backend for this child\n" );
++        else
++            return spawn_process_inproc( params, socketfd, unixdir, winedebug, pe_info );
++    }
 +    return spawn_process_fork( params, socketfd, unixdir, winedebug, pe_info );
 +}
 +
@@ -641,7 +668,7 @@ index 4c2e7eba..766f3264 100644
  /***********************************************************************
   *           __wine_unix_spawnvp
   */
-@@ -591,7 +792,7 @@ static NTSTATUS fork_and_exec( OBJECT_ATTRIBUTES *attr, const char *unix_name, i
+@@ -591,7 +819,7 @@ static NTSTATUS fork_and_exec( OBJECT_ATTRIBUTES *attr, const char *unix_name, i
          {
              close( fd[0] );
  
@@ -650,7 +677,7 @@ index 4c2e7eba..766f3264 100644
                  params->ConsoleHandle == CONSOLE_HANDLE_ALLOC ||
                  params->ConsoleHandle == CONSOLE_HANDLE_ALLOC_NO_WINDOW ||
                  params->ConsoleHandle == NULL)
-@@ -1425,7 +1626,7 @@ NTSTATUS WINAPI NtQueryInformationProcess( HANDLE handle, PROCESSINFOCLASS class
+@@ -1425,7 +1653,7 @@ NTSTATUS WINAPI NtQueryInformationProcess( HANDLE handle, PROCESSINFOCLASS class
          len = sizeof(ULONG_PTR);
          if (size != len) return STATUS_INFO_LENGTH_MISMATCH;
          if (handle == GetCurrentProcess())

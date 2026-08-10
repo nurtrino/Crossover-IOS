@@ -61,10 +61,15 @@ per-pseudo-process, so a child builds its own module list, loads its own
 imports and runs process attach: nested `cmd.exe` returns its exit code
 in-process and `attrib.exe` output matches the fork backend exactly.
 
-**What's left for M1**: cold-prefix `wineboot` (a tree of helper processes)
-still crashes under the flag, some Win32 APIs still fail inside a child, and
-DLL data-segment isolation between pseudo-processes is not yet asserted. The
-in-process backend therefore stays opt-in. Details in
+**Cold-prefix creation works** with the in-process backend enabled: prefix
+bootstrap runs before ntdll's PE side exists, so it deliberately falls back to
+fork, and every child after it runs in-process.
+
+**What's left for M1**: two in-process processes still share one mapping of each
+imported DLL, so DLL globals alias (the likely cause of stray invalid-handle
+failures in children); a crashing child still takes the host down; and M1's
+literal bar needs a display driver this build lacks. The in-process backend
+therefore stays opt-in. Details in
 [`docs/DESIGN-0003-inproc-spawn.md`](docs/DESIGN-0003-inproc-spawn.md).
 iOS bring-up (M2) additionally needs a macOS + iOS SDK toolchain to
 cross-compile for ARM64. See [`docs/ROADMAP.md`](docs/ROADMAP.md).

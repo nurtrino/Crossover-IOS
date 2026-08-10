@@ -382,29 +382,60 @@ to the fork backend. `hostname.exe` runs its real code and prints, but one API
 returns error 6 (see below). Whole wineforge suite green, fork backend
 regression-free.
 
+### Bootstrap boundary (fixed): the model needs a live PE side and a prefix
+
+Cold-prefix creation used to crash the host. Root cause, found by printing the
+init block from the child: Wine creates a missing prefix from **inside early
+init**, so `wineboot` is spawned before ntdll's PE side has published
+`pRtlUserThreadStart` / `pLdrInitializeThunk`. Entering a child then jumps to a
+NULL entry — a raw SIGSEGV with an empty stack, which is exactly what was seen.
+A second phase fails later for the same class of reason: a child's loader cannot
+resolve system DLLs from a prefix that does not exist yet.
+
+`spawn_process` now treats both as what they are — the in-process backend's real
+precondition — and falls back to the fork backend when either holds
+(`!pRtlUserThreadStart || !pLdrInitializeThunk`, or `is_prefix_bootstrap`).
+With that, **a cold prefix builds end to end with the in-process flags on**
+(asserted by `inproc_run_test.sh`), and every child after bootstrap runs
+in-process. On iOS, where there is no fork, bootstrap must ship a prepared
+prefix or defer until the PE side is up — this is now a stated architectural
+requirement rather than a crash.
+
+### The open risk, measured: DLL images are shared between pseudo-processes
+
+Two in-process Windows processes load **one** `kernel32` at **one** base — the
+child reuses the parent's mapping instead of getting a private copy-on-write
+view. Measured directly (`+loaddll`: 2 pseudo-processes, 1 distinct kernel32
+mapping) and printed by `inproc_run_test.sh` every run, so a fix will be
+visible. An earlier reading of 4 distinct bases was wrong: those were *forked*
+processes in separate address spaces, not in-process children.
+
+Consequence: DLL globals alias across pseudo-processes. That is very likely why
+`hostname.exe` runs its real code, prints, and yet gets ERROR_INVALID_HANDLE
+from its computer-name query — a handle cached in a DLL global by one process is
+meaningless in another's handle table. Programs that do not lean on cached
+per-process DLL state (nested `cmd.exe`, `attrib.exe`, import-free PEs) are
+unaffected and match the fork backend exactly.
+
+The principled fix is a private image mapping per pseudo-process for each DLL,
+relocated on collision — the mechanic `peload_test` already proves. It is the
+last real research item in Blocker 1.
+
 ### What still does not work
 
-- **Cold-prefix creation.** `wineboot.exe` building a prefix from scratch
-  spawns a tree of helpers and crashes (SIGSEGV) under `WINE_INPROC_RUN`. Simple
-  console programs work; this heavy multi-child workload does not. Because the
-  behaviour is behind the flag, default Wine is unaffected — but with the flag
-  on a crashing child still takes the host down, so this is not yet safe to
-  make default.
-- **Some Win32 APIs fail in a child.** `hostname.exe` gets ERROR_INVALID_HANDLE
-  from its computer-name query. The child's own code, imports and output all
-  work, so this is per-process state that is still shared somewhere below the
-  loader rather than a loader defect.
-- **DLL data segments are not proven isolated.** Each child maps its own view of
-  its imports, which should give copy-on-write `.data` per process, but nothing
-  yet asserts that two pseudo-processes cannot see each other's DLL globals.
-  That assertion is the natural next test and the remaining correctness risk in
-  Blocker 1.
+- **DLL globals are shared** (above) — the open correctness risk, and the known
+  cause class for stray `ERROR_INVALID_HANDLE` in children (`hostname.exe`).
+- **A crashing child still takes the host down.** There is no per-pseudo-process
+  fault containment, so the in-process backend stays opt-in behind
+  `WINE_INPROC_SPAWN` / `WINE_INPROC_RUN`.
+- **M1's literal bar is not met.** `wine notepad.exe` needs a display driver this
+  `--without-x` build does not have, and "all fork/exec compiled out" is not
+  true while bootstrap deliberately falls back to fork.
 
-M1's definition (`wine notepad.exe` with all fork/exec compiled out) is not met:
-notepad needs a display driver this prefix was not built with, and cold-prefix
-bring-up still crashes. What is proven is the mechanism M1 rests on — Windows
-processes as thread groups, running real DLL-importing programs, on a shared
-in-thread wineserver, with no fork/exec anywhere in child creation.
+What *is* proven is the mechanism M1 rests on: Windows processes as thread
+groups in one address space, running real DLL-importing programs against a
+shared in-thread wineserver, with no fork/exec in the creation of any child
+after bootstrap.
 
 ## Risks / open questions
 
