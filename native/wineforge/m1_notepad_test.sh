@@ -3,15 +3,19 @@
 # still missing, not a passing test. It is deliberately NOT wired into
 # `make test-real`; run it by hand to check progress toward M1.
 #
-# Current result, narrowed:
-#   * notepad as the PRIMARY process, in-process backend on: runs and stays up
-#     (20s, no errors) — verified by hand.
-#   * notepad spawned as an IN-PROCESS CHILD by explorer's desktop path: exits
-#     early, so the host-process comparison is never reached.
-# So the gap is not "notepad cannot run in-process" but "a GUI child launched
-# through explorer does not survive". Root cause not yet found; suspect the
-# same shared-DLL-globals class as hostname.exe (user32/win32u state cached in
-# DLL globals that alias across pseudo-processes).
+# Current result on the PE-DLL build:
+#   * notepad with the in-process backend on, against a WARM server: runs and
+#     stays up, same as the fork backend (both verified alive).
+#   * against a COLD server, explorer's desktop path spawns notepad as an
+#     in-process CHILD, and that child exits early.
+# So the remaining gap is specifically a GUI child launched through explorer.
+# PE-format DLLs (which fixed hostname.exe and gave each pseudo-process its own
+# kernel32) did NOT fix this one, so the cause is elsewhere.
+#
+# Note the measurement tension: killing the server between backends is required
+# for the host-process count to mean anything (otherwise the second run
+# inherits the first's services.exe/explorer.exe), but that same cold start is
+# what triggers the failing child path.
 #
 # M1 — `wine notepad.exe` with Windows child processes as threads, not processes.
 #
@@ -71,7 +75,10 @@ DISPLAY="$dpy" WINEPREFIX="$prefix" WINEDEBUG=-all timeout 240 "$wine" wineboot.
 
 measure() {   # $1 = label, rest = env assignments
     local label="$1"; shift
-    WINEPREFIX="$prefix" "$wineserver" -k 2>/dev/null; sleep 2
+    # Each backend is measured from a clean server, otherwise the first run
+    # leaves services.exe/explorer.exe up and the second inherits them, which
+    # makes the host-process comparison meaningless.
+    WINEPREFIX="$prefix" "$wineserver" -k 2>/dev/null; sleep 3
     # `timeout` reports 124 when it had to kill a still-running program, which
     # is what "notepad stayed up" looks like for a GUI app with no one to close it
     DISPLAY="$dpy" WINEPREFIX="$prefix" WINEDEBUG=-all env "$@" \
@@ -82,7 +89,7 @@ measure() {   # $1 = label, rest = env assignments
     wait "$job"; local rc=$?
     local alive=0; [ "$rc" = 124 ] && alive=1
     echo "$label|$alive|$n"
-    WINEPREFIX="$prefix" "$wineserver" -k 2>/dev/null; sleep 2
+    sleep 2
 }
 
 echo "running notepad.exe on each backend"

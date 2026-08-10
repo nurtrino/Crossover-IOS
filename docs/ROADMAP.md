@@ -109,10 +109,11 @@ Every phase ends with something demonstrable.
       (verified by hand, 20s, no errors); it only exits early when explorer's
       desktop path spawns it as an in-process **child**. So the gap is a GUI
       child launched through explorer, not notepad itself — suspected to be the
-      same shared-DLL-globals class as `hostname.exe`. Also still open: DLL globals alias between
-      pseudo-processes (PE-format DLLs would fix it, but this host's mingw
-      lacks the lld/clang support `configure` needs to enable them), and there
-      is no per-pseudo-process fault containment
+      same shared-DLL-globals class as `hostname.exe`. **DLL isolation is now solved**: building with mingw
+      produces 602 real PE DLLs and two pseudo-processes map two distinct
+      kernel32 images, which also fixed `hostname.exe`. Still open: a GUI child
+      spawned through explorer exits early, and there is no per-pseudo-process
+      fault containment
 
 ## Phase 3 — iOS bring-up (WS-C) → M2
 - [ ] Cross-build the fork against the iOS SDK (winelib static libs + dylibs)

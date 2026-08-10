@@ -24,13 +24,18 @@ Two build knobs matter for what the suite can prove:
   the most likely fix for the remaining in-process failures (`hostname.exe`'s
   ERROR_INVALID_HANDLE, GUI children dying under explorer).
 
-  **Blocked on this host, precisely.** `gcc-mingw-w64-x86-64` installs and
-  `configure` finds both the compiler and `x86_64-w64-mingw32-ld`
-  (`wine_cv_x86_64_crosscc=yes`), but `ac_cv_x86_64_crosscc_c99` comes back
-  **empty** — the cross compiler fails configure's C99 conformance probe, so
-  `CROSSCC` is never set and every DLL falls back to `.so`. Start there: rerun
-  that probe by hand (see `config.log`) and either satisfy it or install a
-  mingw/clang+lld toolchain that passes.
+  **This is now enabled and it fixed two failures.** An earlier note here
+  claimed the PE build was blocked by a failed C99 probe — that was wrong: an
+  empty `ac_cv_x86_64_crosscc_c99` means the probe *succeeded* with no extra
+  flag. Reconfiguring without `--without-mingw` builds 602 real
+  `PE32+ executable (DLL)` files under `dlls/<name>/x86_64-windows/`, and with
+  them:
+
+  - `hostname.exe` as an in-process child now prints the same answer as the
+    fork backend; its `ERROR_INVALID_HANDLE` is gone.
+  - **DLL globals are isolated**: two pseudo-processes now map *two distinct*
+    `kernel32` images (was 2 processes / 1 mapping on the `.so` build).
+
 - **`--without-x` omits `winex11.drv`**, so no GUI app can run and the M1
   notepad test cannot be executed. Keep X11 in (and run under `Xvfb`).
 
