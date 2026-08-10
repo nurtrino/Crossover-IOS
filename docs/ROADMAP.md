@@ -105,8 +105,11 @@ Every phase ends with something demonstrable.
       single host process — gate script `native/wineforge/m1_notepad_test.sh`
       (currently FAILING; not wired into the suite). Status: the build now has
       `winex11.drv`, and notepad runs headless under Xvfb on the fork backend;
-      as an in-process child spawned via the desktop path it exits early, root
-      cause not yet found. Also still open: DLL globals alias between
+      as the primary process with the in-process backend on it runs and stays up
+      (verified by hand, 20s, no errors); it only exits early when explorer's
+      desktop path spawns it as an in-process **child**. So the gap is a GUI
+      child launched through explorer, not notepad itself — suspected to be the
+      same shared-DLL-globals class as `hostname.exe`. Also still open: DLL globals alias between
       pseudo-processes (PE-format DLLs would fix it, but this host's mingw
       lacks the lld/clang support `configure` needs to enable them), and there
       is no per-pseudo-process fault containment

@@ -3,9 +3,15 @@
 # still missing, not a passing test. It is deliberately NOT wired into
 # `make test-real`; run it by hand to check progress toward M1.
 #
-# Current result: notepad stays up on the fork backend, but when the desktop
-# path spawns it as an in-process child it exits early, so the host-process
-# comparison never gets made. Root cause not yet found.
+# Current result, narrowed:
+#   * notepad as the PRIMARY process, in-process backend on: runs and stays up
+#     (20s, no errors) — verified by hand.
+#   * notepad spawned as an IN-PROCESS CHILD by explorer's desktop path: exits
+#     early, so the host-process comparison is never reached.
+# So the gap is not "notepad cannot run in-process" but "a GUI child launched
+# through explorer does not survive". Root cause not yet found; suspect the
+# same shared-DLL-globals class as hostname.exe (user32/win32u state cached in
+# DLL globals that alias across pseudo-processes).
 #
 # M1 — `wine notepad.exe` with Windows child processes as threads, not processes.
 #
