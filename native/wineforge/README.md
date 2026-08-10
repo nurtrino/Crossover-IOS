@@ -193,3 +193,36 @@ replace Wine's `CreateProcess`→`exec` (`dlls/ntdll/unix/process.c`,
 `loader.c`) with a `pproc_spawn`-style in-address-space launch. Scoped as
 patch series 0002 in `docs/NATIVE_PORT.md`. This is the large, invasive part;
 it is developed host-first on Linux before any iOS cross-compile.
+
+### 0003g — per-process PE-side loader state; DLL-importing children run (PASSING)
+
+The last named blocker in Blocker 1's client half. ntdll's loader globals move
+into one per-pseudo-process `struct ldr_proc_state`, reached in O(1) from
+`peb->LdrData` with `CONTAINING_RECORD` — no registry, no lock. Call sites are
+untouched: the former global names are `#define`d to the block's fields (field
+names differ from macro names so member access never re-expands). The primary
+process keeps the static instance, so its behaviour is unchanged.
+
+A child arriving with `peb->LdrData == NULL` gets its own block in
+`loader_init`, then runs the ordinary first-time branch: its own heap, its own
+module list, its own imports, process attach. `SkipLoaderInit` and the import
+gate from 0003f are no longer needed and were removed.
+
+`inproc_run_test.sh` now covers both classes: import-free children (exit codes
+7/42/123 from the server's own trace) and DLL-importing ones — **nested
+`cmd.exe` returning exit code 7 in-process**, and `attrib.exe` output identical
+to the fork backend.
+
+Findings:
+
+13. **The loader's globals were mostly just storage.** `loader_init` already
+    published them through `peb->LdrData`/`TlsBitmap`/`LoaderLock`, so making
+    the storage per-process was a far smaller change than the raw use count
+    suggested — ~64 uses, all inside `loader.c`.
+14. **Sharing the loader lock is the right call.** One `loader_section` across
+    pseudo-processes is conservative and deadlock-free; per-process locks would
+    buy concurrency the model does not yet need.
+15. **Heavy multi-child workloads still break.** Cold-prefix `wineboot` spawns
+    a tree of helpers and crashes under the flag. Simple console programs work.
+    With the flag on, a crashing child still takes the host down — which is why
+    the in-process backend stays opt-in.

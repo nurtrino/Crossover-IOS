@@ -342,32 +342,69 @@ through `cmd /c exitN.exe` returns N correctly.
 
 ### What is genuinely left for M1
 
-**Per-process PE-side loader state** — running children that import DLLs.
-Everything else in M1's client half is done and tested: the spawn seam, the
-three process-globals, the attach, the child's own startup info and image, and
-execution of import-free programs.
+## Status: 0003g landed (2026-08-10) — DLL-importing children run
 
-The remaining work is bounded and named. `dlls/ntdll/loader.c` keeps the
-loader's state in process-globals that must become per-pseudo-process before
-a second process can load DLLs:
+The last named blocker is done: ntdll's **PE-side** loader state is now
+per-pseudo-process, so a second Windows process in one address space builds its
+own module list, loads its own imports, and runs process attach — exactly as a
+forked child would.
 
-| state | what it is |
-|---|---|
-| `imports_fixup_done`, `attach_done` | one-shot gates in `loader_init` |
-| `ldr` (`PEB_LDR_DATA`), `hash_table` | the module list and its index |
-| `tls_bitmap`, `tls_expansion_bitmap`, `tls_dirs` | TLS slot allocation |
-| `node_ntdll`, `node_kernel32`, `pBaseThreadInitThunk` | resolved system-DLL handles |
-| `loader_section`, `peb_lock`, `default_load_path` | loader lock and search path |
+**The mechanism.** All of the loader's process-globals move into one
+`struct ldr_proc_state`: the `PEB_LDR_DATA` itself, the module hash table, the
+base-address index tree, TLS bitmaps + directories, the resolved system-DLL
+nodes, the modref caches, the DLL search path, and the one-shot gates
+(`imports_fixup_done`, `attach_done`, `process_detaching`). The block is reached
+in **O(1) with no registry and no lock**: `loader_init` points `peb->LdrData` at
+the block's first field, so `CONTAINING_RECORD` recovers it from the PEB. The
+primary process keeps the static instance, so its behaviour is unchanged; the
+call sites are unchanged too, because the former global names are `#define`d to
+the block's fields (field names deliberately differ from the macro names so
+member access never re-expands).
 
-Note `peb->LdrData` and friends are *assigned from* these statics in
-`loader_init`, so per-process instancing is mostly a matter of allocating that
-set per pseudo-process and pointing the child's PEB at its own copy — the same
-`current_x()` shape used three times already. The genuinely open question is
-not the bookkeeping but **DLL data segments**: two pseudo-processes sharing one
-mapped `kernel32` share its mutable globals, where real Windows would give
-each a private copy-on-write view. Mapping a second private copy per
-pseudo-process (PE relocation already proven by `peload_test`) is the
-principled fix and the last real research item in Blocker 1.
+`loader_init` gains one step: a pseudo-process arriving with
+`peb->LdrData == NULL` gets its own block — the first process ever takes the
+static (no heap exists yet), later ones allocate from the heap they inherited
+from their parent, before creating their own.
+
+Deliberately still shared: `loader_section` and `peb_lock` (one loader lock
+across pseudo-processes is conservative and deadlock-free) and the known-DLL
+directory handle.
+
+With this in place `SkipLoaderInit` and the import gate from 0003f are gone —
+children enter their PE through the normal `LdrInitializeThunk` → `loader_init`
+path, import-free or not.
+
+**Evidence** (`inproc_run_test.sh`, deterministic): import-free children still
+map, run and exit with codes 7/42/123 confirmed from the server's own `-d1`
+trace; **nested `cmd.exe`** — a heavy DLL user — runs as an in-process child and
+returns exit code 7, matching the fork backend; `attrib.exe` output is identical
+to the fork backend. `hostname.exe` runs its real code and prints, but one API
+returns error 6 (see below). Whole wineforge suite green, fork backend
+regression-free.
+
+### What still does not work
+
+- **Cold-prefix creation.** `wineboot.exe` building a prefix from scratch
+  spawns a tree of helpers and crashes (SIGSEGV) under `WINE_INPROC_RUN`. Simple
+  console programs work; this heavy multi-child workload does not. Because the
+  behaviour is behind the flag, default Wine is unaffected — but with the flag
+  on a crashing child still takes the host down, so this is not yet safe to
+  make default.
+- **Some Win32 APIs fail in a child.** `hostname.exe` gets ERROR_INVALID_HANDLE
+  from its computer-name query. The child's own code, imports and output all
+  work, so this is per-process state that is still shared somewhere below the
+  loader rather than a loader defect.
+- **DLL data segments are not proven isolated.** Each child maps its own view of
+  its imports, which should give copy-on-write `.data` per process, but nothing
+  yet asserts that two pseudo-processes cannot see each other's DLL globals.
+  That assertion is the natural next test and the remaining correctness risk in
+  Blocker 1.
+
+M1's definition (`wine notepad.exe` with all fork/exec compiled out) is not met:
+notepad needs a display driver this prefix was not built with, and cold-prefix
+bring-up still crashes. What is proven is the mechanism M1 rests on — Windows
+processes as thread groups, running real DLL-importing programs, on a shared
+in-thread wineserver, with no fork/exec anywhere in child creation.
 
 ## Risks / open questions
 

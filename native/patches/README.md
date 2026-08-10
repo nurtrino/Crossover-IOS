@@ -102,10 +102,14 @@ behavior is byte-for-byte unchanged — every new path is opt-in behind
   split out because `init_process_done` makes the server drop the staged
   startup info — it must come *after* `get_startup_info`.
 
-- **Stage f — the child runs** (`process.c`): the child enters its PE via
-  Wine's `SkipLoaderInit` with an inherited (shared-ntdll) module list, and
-  `image_needs_loader()` gates entry on the image's import directory so
-  DLL-importing children are refused rather than faulting the host.
+- **Stage f — the child runs** (`process.c`): the child enters its PE through
+  the normal `RtlUserThreadStart` path and exits with its program's exit code.
+- **Stage g — per-process PE-side loader state** (`dlls/ntdll/loader.c`): the
+  loader's process-globals move into one `struct ldr_proc_state` per
+  pseudo-process, reached O(1) from `peb->LdrData` via `CONTAINING_RECORD`;
+  call sites unchanged via `#define`. Children build their own module list,
+  load their own imports and run process attach, so DLL-importing programs
+  (nested `cmd.exe`, `attrib.exe`) run in-process.
 
 Validated by `native/wineforge/spawn_seam_test.sh` (both dispatch directions,
 server-side handshake counts, per-child image mapping) and

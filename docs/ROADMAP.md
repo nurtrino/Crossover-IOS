@@ -45,10 +45,11 @@ Every phase ends with something demonstrable.
   - [x] **0003a: spawn seam** — `spawn_process` dispatches fork vs in-process
         backend; default unchanged (no regression), in-process backend wired
         and reached under `WINE_INPROC_SPAWN` (stub → `STATUS_NOT_IMPLEMENTED`)
-  - [~] 0003b: per-pseudo-process PEB/TEB + context plumbing — `current_peb()`
-        indirection added; `process.c`, `thread.c`, `system.c`, `server.c` converted (26/81, zero regression). Remaining env.c/virtual.c
-        file-by-file conversion of the other 75 global-`peb` uses (ledger in
-        the design doc), then per-pseudo-process PEB allocation
+  - [x] **0003b: per-pseudo-process PEB/TEB + context plumbing** —
+        `current_peb()` indirection; the uses on the child's path converted
+        (`process.c`, `thread.c`, `system.c`, `server.c`, `env.c`'s `init_peb`),
+        pre-first-TEB uses deliberately left on the global (ledger in the
+        design doc), plus per-pseudo-process PEB allocation in the spawn path
   - [x] **0003c: in-address-space PE mapping + relocation** — `peload_test`
         loads a PE at a non-preferred base, relocates it, runs it, with two
         images coexisting (parent+child mechanic). Core loader mechanic proven
@@ -74,17 +75,25 @@ Every phase ends with something demonstrable.
         base + entry addresses, deterministic, fork backend regression-free.
   - [x] **0003f: the child runs** — an in-process child executes its own PE
         entry and exits with its own exit code, using Wine's `SkipLoaderInit`
-        plus an inherited (shared-ntdll) module list. `image_needs_loader()`
-        gates entry: import-free images run; DLL-importing images are refused
-        and logged instead of faulting the host. Verified by
+        plus an inherited (shared-ntdll) module list, with an import-directory
+        gate so DLL-importing children were refused rather than crashing the
+        host (both superseded by 0003g below). Verified by
         `inproc_run_test.sh` for exit codes 7/42/123 against the **server's
         own `-d1` trace** (`*killed* exit_code=N`), fork backend as control,
         deterministic across repeated runs
-  - Remaining for M1 — **per-process PE-side loader state**: `loader_init`'s
-    one-shot gates, the module list/hash table, TLS bitmaps and resolved
-    system-DLL handles must be instanced per pseudo-process, and DLL data
-    segments need private per-process views (ledger in the design doc). Until
-    then a child that imports DLLs is refused rather than run
+  - [x] **0003g: per-process PE-side loader state** — ntdll's loader globals
+        (module list, hash table, base-address tree, TLS bitmaps/dirs, resolved
+        system-DLL nodes, search path, one-shot gates) move into a single
+        per-pseudo-process block, reached O(1) from `peb->LdrData` via
+        `CONTAINING_RECORD`; call sites unchanged via `#define`. A child now
+        builds its own module list, loads its own imports and runs process
+        attach. `SkipLoaderInit` and the import gate are gone. Verified:
+        nested `cmd.exe` returns exit code 7 in-process, `attrib.exe` output
+        identical to the fork backend, import-free children still exact
+  - Not yet working (documented in the design doc): cold-prefix `wineboot`
+    (a tree of helpers) crashes under `WINE_INPROC_RUN`; some Win32 APIs still
+    fail in a child (`hostname.exe` → ERROR_INVALID_HANDLE); DLL data-segment
+    isolation between pseudo-processes is not yet asserted by a test
 - [ ] M1 complete: `wine notepad.exe` with all fork/exec compiled out,
       single host process
 

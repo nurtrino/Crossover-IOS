@@ -1,3 +1,208 @@
+diff --git a/dlls/ntdll/loader.c b/dlls/ntdll/loader.c
+index c5c34935..ac4cffea 100644
+--- a/dlls/ntdll/loader.c
++++ b/dlls/ntdll/loader.c
+@@ -89,15 +89,12 @@ static const WCHAR system_dir[] = L"C:\\windows\\system32\\";
+ static const WCHAR system_path[] = L"C:\\windows\\system32;C:\\windows\\system;C:\\windows";
+ 
+ static BOOL is_prefix_bootstrap;  /* are we bootstrapping the prefix? */
+-static BOOL imports_fixup_done = FALSE;  /* set once the imports have been fixed up, before attaching them */
+-static BOOL process_detaching = FALSE;  /* set on process detach to avoid deadlocks with thread detach */
+ static int free_lib_count;   /* recursion depth of LdrUnloadDll calls */
+ static LONG path_safe_mode;  /* path mode set by RtlSetSearchPathMode */
+ static LONG dll_safe_mode = 1;  /* dll search mode */
+ static UNICODE_STRING dll_directory;  /* extra path for LdrSetDllDirectory */
+ static UNICODE_STRING system_dll_path; /* path to search for system dependency dlls */
+ static DWORD default_search_flags;  /* default flags set by LdrSetDefaultDllDirectories */
+-static WCHAR *default_load_path;    /* default dll search path */
+ static HANDLE known_dlls_ntdir;  /* NT directory containing known dlls sections */
+ 
+ struct dll_dir_entry
+@@ -131,7 +128,6 @@ struct file_id
+ };
+ 
+ #define HASH_MAP_SIZE 32
+-static LIST_ENTRY hash_table[HASH_MAP_SIZE];
+ 
+ /* internal representation of loaded modules */
+ typedef struct _wine_modref
+@@ -142,8 +138,6 @@ typedef struct _wine_modref
+     BOOL                  system;
+ } WINE_MODREF;
+ 
+-static UINT tls_module_count = 32;     /* number of modules with TLS directory */
+-static IMAGE_TLS_DIRECTORY *tls_dirs;  /* array of TLS directories */
+ 
+ static RTL_CRITICAL_SECTION loader_section;
+ static RTL_CRITICAL_SECTION_DEBUG critsect_debug =
+@@ -172,23 +166,83 @@ static RTL_CRITICAL_SECTION_DEBUG peb_critsect_debug =
+ };
+ static RTL_CRITICAL_SECTION peb_lock = { &peb_critsect_debug, -1, 0, 0, 0, 0 };
+ 
+-static PEB_LDR_DATA ldr =
+-{
+-    sizeof(ldr), TRUE, NULL,
+-    { &ldr.InLoadOrderModuleList, &ldr.InLoadOrderModuleList },
+-    { &ldr.InMemoryOrderModuleList, &ldr.InMemoryOrderModuleList },
+-    { &ldr.InInitializationOrderModuleList, &ldr.InInitializationOrderModuleList }
++/*
++ * Crossover-IOS fork, patch series 0003g: per-pseudo-process PE-side loader
++ * state.
++ *
++ * These were process-globals, which is correct while one Windows process owns
++ * the address space. The in-process model runs several, and each needs its own
++ * module list, module hash table, TLS slot allocation and one-shot init gates
++ * — otherwise a second process sees the first one's "already initialized" and
++ * dies looking for its own image in a list it was never added to.
++ *
++ * The block is reached in O(1) with no registry and no lock: loader_init
++ * points peb->LdrData at the block's first field, so the current process's
++ * block is a CONTAINING_RECORD away from the PEB. The primary process uses the
++ * static instance below, so its behaviour is bit-for-bit what it was.
++ *
++ * Shared on purpose (NOT per-process): loader_section / peb_lock (a global
++ * loader lock across pseudo-processes is conservative and deadlock-free) and
++ * the known-dll directory handle.
++ */
++struct ldr_proc_state
++{
++    PEB_LDR_DATA          s_ldr;            /* MUST be first: peb->LdrData points here */
++    LIST_ENTRY            s_hash_table[HASH_MAP_SIZE];
++    RTL_RB_TREE           s_base_address_index_tree;
++    RTL_BITMAP            s_tls_bitmap;
++    RTL_BITMAP            s_tls_expansion_bitmap;
++    IMAGE_TLS_DIRECTORY  *s_tls_dirs;       /* array of TLS directories */
++    UINT                  s_tls_module_count;/* number of modules with TLS directory */
++    WINE_MODREF          *s_cached_modref;
++    WINE_MODREF          *s_last_failed_modref;
++    LDR_DDAG_NODE        *s_node_ntdll, *s_node_kernel32;
++    WCHAR                *s_default_load_path;
++    BOOL                  s_imports_fixup_done;
++    BOOL                  s_attach_done;
++    BOOL                  s_process_detaching;
+ };
+ 
+-static RTL_RB_TREE base_address_index_tree;
++static struct ldr_proc_state primary_ldr_state =
++{
++    .s_ldr =
++    {
++        sizeof(PEB_LDR_DATA), TRUE, NULL,
++        { &primary_ldr_state.s_ldr.InLoadOrderModuleList,
++          &primary_ldr_state.s_ldr.InLoadOrderModuleList },
++        { &primary_ldr_state.s_ldr.InMemoryOrderModuleList,
++          &primary_ldr_state.s_ldr.InMemoryOrderModuleList },
++        { &primary_ldr_state.s_ldr.InInitializationOrderModuleList,
++          &primary_ldr_state.s_ldr.InInitializationOrderModuleList }
++    },
++    .s_tls_module_count = 32,
++};
+ 
+-static RTL_BITMAP tls_bitmap;
+-static RTL_BITMAP tls_expansion_bitmap;
++static inline struct ldr_proc_state *ldr_state(void)
++{
++    TEB *teb = NtCurrentTeb();
++    PEB *peb = teb ? teb->Peb : NULL;
+ 
+-static WINE_MODREF *cached_modref;
+-static WINE_MODREF *last_failed_modref;
++    if (peb && peb->LdrData)
++        return CONTAINING_RECORD( peb->LdrData, struct ldr_proc_state, s_ldr );
++    return &primary_ldr_state;  /* before loader_init installs the block */
++}
+ 
+-static LDR_DDAG_NODE *node_ntdll, *node_kernel32;
++/* Redirect the former globals at their (unchanged) call sites. The field names
++ * differ from the macro names so member access never re-expands. */
++#define hash_table              (ldr_state()->s_hash_table)
++#define base_address_index_tree (ldr_state()->s_base_address_index_tree)
++#define tls_bitmap              (ldr_state()->s_tls_bitmap)
++#define tls_expansion_bitmap    (ldr_state()->s_tls_expansion_bitmap)
++#define tls_dirs                (ldr_state()->s_tls_dirs)
++#define tls_module_count        (ldr_state()->s_tls_module_count)
++#define cached_modref           (ldr_state()->s_cached_modref)
++#define last_failed_modref      (ldr_state()->s_last_failed_modref)
++#define node_ntdll              (ldr_state()->s_node_ntdll)
++#define node_kernel32           (ldr_state()->s_node_kernel32)
++#define default_load_path       (ldr_state()->s_default_load_path)
++#define imports_fixup_done      (ldr_state()->s_imports_fixup_done)
++#define process_detaching       (ldr_state()->s_process_detaching)
+ 
+ static NTSTATUS load_dll( const WCHAR *load_path, const WCHAR *libname, DWORD flags, WINE_MODREF** pwm, BOOL system );
+ static NTSTATUS process_attach( LDR_DDAG_NODE *node, LPVOID lpReserved );
+@@ -4409,10 +4463,10 @@ static void release_address_space(void)
+  */
+ void loader_init( CONTEXT *context, void **entry )
+ {
+-    static int attach_done;
+     NTSTATUS status;
+     ULONG_PTR cookie, port = 0;
+     WINE_MODREF *wm;
++    PEB *cur_peb = NtCurrentTeb()->Peb;
+ 
+     if (process_detaching) NtTerminateThread( GetCurrentThread(), 0 );
+ 
+@@ -4420,6 +4474,38 @@ void loader_init( CONTEXT *context, void **entry )
+ 
+     RtlEnterCriticalSection( &loader_section );
+ 
++    /*
++     * 0003g: give a pseudo-process that has no loader state its own block.
++     * Done under loader_section so the primary claim cannot race. The first
++     * process to arrive takes the static instance (no heap exists yet); every
++     * later one allocates. A child's block comes from the heap it inherited
++     * from its parent, before it creates its own below — a small, deliberate
++     * cross-process allocation.
++     */
++    if (!cur_peb->LdrData)
++    {
++        static BOOL primary_claimed;
++        struct ldr_proc_state *st;
++
++        if (!primary_claimed)
++        {
++            primary_claimed = TRUE;
++            st = &primary_ldr_state;
++        }
++        else
++        {
++            st = RtlAllocateHeap( GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*st) );
++            if (!st) NtTerminateProcess( GetCurrentProcess(), STATUS_NO_MEMORY );
++            st->s_ldr.Length = sizeof(PEB_LDR_DATA);
++            st->s_ldr.Initialized = TRUE;
++            InitializeListHead( &st->s_ldr.InLoadOrderModuleList );
++            InitializeListHead( &st->s_ldr.InMemoryOrderModuleList );
++            InitializeListHead( &st->s_ldr.InInitializationOrderModuleList );
++            st->s_tls_module_count = 32;
++        }
++        cur_peb->LdrData = &st->s_ldr;
++    }
++
+     if (!imports_fixup_done)
+     {
+         ANSI_STRING ctrl_routine = RTL_CONSTANT_STRING( "CtrlRoutine" );
+@@ -4427,7 +4513,7 @@ void loader_init( CONTEXT *context, void **entry )
+         PEB *peb = NtCurrentTeb()->Peb;
+         unsigned int i;
+ 
+-        peb->LdrData            = &ldr;
++        peb->LdrData            = &ldr_state()->s_ldr;
+         peb->FastPebLock        = &peb_lock;
+         peb->TlsBitmap          = &tls_bitmap;
+         peb->TlsExpansionBitmap = &tls_expansion_bitmap;
+@@ -4512,9 +4598,9 @@ void loader_init( CONTEXT *context, void **entry )
+ 
+     NtCurrentTeb()->FlsSlots = fls_alloc_data();
+ 
+-    if (!attach_done)  /* first time around */
++    if (!ldr_state()->s_attach_done)  /* first time around */
+     {
+-        attach_done = 1;
++        ldr_state()->s_attach_done = TRUE;
+         if ((status = alloc_thread_tls()) != STATUS_SUCCESS)
+         {
+             ERR( "TLS init  failed when loading %s, status %lx\n",
 diff --git a/dlls/ntdll/unix/env.c b/dlls/ntdll/unix/env.c
 index 0fb7c59e..fd155c7c 100644
 --- a/dlls/ntdll/unix/env.c
@@ -195,7 +400,7 @@ index cb700dd8..95d6b05f 100644
      return status;
  }
 diff --git a/dlls/ntdll/unix/process.c b/dlls/ntdll/unix/process.c
-index 4c2e7eba..75aebfbb 100644
+index 4c2e7eba..766f3264 100644
 --- a/dlls/ntdll/unix/process.c
 +++ b/dlls/ntdll/unix/process.c
 @@ -33,6 +33,7 @@
@@ -232,7 +437,7 @@ index 4c2e7eba..75aebfbb 100644
                  params->ConsoleHandle == CONSOLE_HANDLE_ALLOC ||
                  params->ConsoleHandle == CONSOLE_HANDLE_ALLOC_NO_WINDOW ||
                  params->ConsoleHandle == NULL)
-@@ -464,6 +468,253 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
+@@ -464,6 +468,203 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
  }
  
  
@@ -253,46 +458,6 @@ index 4c2e7eba..75aebfbb 100644
 + * docs/DESIGN-0003-inproc-spawn.md. Until they land this backend is a wired
 + * but unimplemented seam.
 + */
-+/***********************************************************************
-+ *           image_needs_loader
-+ *
-+ * True if a mapped image has an import directory, i.e. it needs ntdll's
-+ * PE-side loader to resolve DLLs. A second Windows process in one address
-+ * space cannot do that yet (loader_init's imports_fixup_done/attach_done are
-+ * process-globals; see docs/DESIGN-0003-inproc-spawn.md). Import-free images
-+ * can be entered directly and correctly, so this is the gate between what an
-+ * in-process child can run today and what awaits loader instancing.
-+ */
-+static BOOL image_needs_loader( const void *base )
-+{
-+    const IMAGE_DOS_HEADER *dos = base;
-+    const IMAGE_NT_HEADERS *nt;
-+    const IMAGE_DATA_DIRECTORY *dir;
-+    DWORD count;
-+
-+    if (!base || dos->e_magic != IMAGE_DOS_SIGNATURE) return TRUE;
-+    nt = (const IMAGE_NT_HEADERS *)((const char *)base + dos->e_lfanew);
-+    if (nt->Signature != IMAGE_NT_SIGNATURE) return TRUE;
-+
-+    if (nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC)
-+    {
-+        const IMAGE_OPTIONAL_HEADER64 *opt = (const IMAGE_OPTIONAL_HEADER64 *)&nt->OptionalHeader;
-+        count = opt->NumberOfRvaAndSizes;
-+        dir = opt->DataDirectory;
-+    }
-+    else if (nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC)
-+    {
-+        const IMAGE_OPTIONAL_HEADER32 *opt = (const IMAGE_OPTIONAL_HEADER32 *)&nt->OptionalHeader;
-+        count = opt->NumberOfRvaAndSizes;
-+        dir = opt->DataDirectory;
-+    }
-+    else return TRUE;
-+
-+    if (count <= IMAGE_DIRECTORY_ENTRY_IMPORT) return FALSE;
-+    return !!dir[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
-+}
-+
-+
 +static void *inproc_process_thread( void *arg )
 +{
 +    TEB *teb = arg;
@@ -339,26 +504,17 @@ index 4c2e7eba..75aebfbb 100644
 +     * long tail (docs/DESIGN-0003-inproc-spawn.md "per-process DLL globals").
 +     * Gated so the tested attach+map path above cannot regress while that
 +     * work proceeds. */
-+    if (!status && getenv( "WINE_INPROC_RUN" ) &&
-+        !image_needs_loader( current_peb()->ImageBaseAddress ))
++    if (!status && getenv( "WINE_INPROC_RUN" ))
 +    {
-+        /* SkipLoaderInit is Wine's own mechanism for entering a thread without
-+         * running the PE-side loader (THREAD_CREATE_FLAGS_SKIP_LOADER_INIT).
-+         * The child needs it because loader_init's imports_fixup_done /
-+         * attach_done statics are already set by the parent, so a second
-+         * process falls into the thread-attach branch and dies on a NULL
-+         * modref for its own (unregistered) image. With it set, the child
-+         * reaches its PE entry through the normal RtlUserThreadStart path.
-+         * This runs import-free images correctly; images that need DLLs still
-+         * need per-process loader instancing (the long tail). */
-+        teb->SkipLoaderInit = TRUE;
++        /* The child enters its PE through the normal path: LdrInitializeThunk
++         * -> loader_init, which (0003g) gives this pseudo-process its own
++         * loader state — its own module list, hash table, TLS bitmaps and
++         * one-shot gates — then builds its main module, loads its imports and
++         * runs process attach, exactly as a forked child would. */
 +        MESSAGE( "wine: in-process child entering PE (WINE_INPROC_RUN)\n" );
 +        signal_start_thread( current_image_info()->TransferAddress, current_peb(), FALSE, teb );
 +        /* not reached */
 +    }
-+    else if (!status && getenv( "WINE_INPROC_RUN" ))
-+        MESSAGE( "wine: in-process child needs the PE-side loader; not entered "
-+                 "(see docs/DESIGN-0003-inproc-spawn.md)\n" );
 +
 +    /* Detach cleanly: closing the thread/process fds is the same death signal
 +     * a real child's exit gives the server, so the process object is reaped
@@ -405,13 +561,12 @@ index 4c2e7eba..75aebfbb 100644
 +        return STATUS_NO_MEMORY;
 +    }
 +    *child_peb = *current_peb();
-+    /* ProcessParameters becomes the child's own in init_startup_info_inproc.
-+     * LdrData is deliberately INHERITED: this is the shared-ntdll model from
-+     * docs/DESIGN-0003-inproc-spawn.md — the child runs on the parent's
-+     * already-initialized ntdll and loads nothing of its own, so it starts
-+     * from the parent's module list (which the entry path walks). Per-process
-+     * module lists arrive with PE-side loader instancing. */
++    /* Both become the child's own: ProcessParameters in
++     * init_startup_info_inproc, LdrData when the PE-side loader installs this
++     * process's own loader state (0003g). NULL is the signal that this
++     * pseudo-process has no loader state yet. */
 +    child_peb->ProcessParameters = NULL;
++    child_peb->LdrData           = NULL;
 +
 +    /* the child's own main-image info: its EXE, not the parent's */
 +    child_image_info = anon_mmap_alloc( page_size, PROT_READ | PROT_WRITE );
@@ -486,7 +641,7 @@ index 4c2e7eba..75aebfbb 100644
  /***********************************************************************
   *           __wine_unix_spawnvp
   */
-@@ -591,7 +842,7 @@ static NTSTATUS fork_and_exec( OBJECT_ATTRIBUTES *attr, const char *unix_name, i
+@@ -591,7 +792,7 @@ static NTSTATUS fork_and_exec( OBJECT_ATTRIBUTES *attr, const char *unix_name, i
          {
              close( fd[0] );
  
@@ -495,7 +650,7 @@ index 4c2e7eba..75aebfbb 100644
                  params->ConsoleHandle == CONSOLE_HANDLE_ALLOC ||
                  params->ConsoleHandle == CONSOLE_HANDLE_ALLOC_NO_WINDOW ||
                  params->ConsoleHandle == NULL)
-@@ -1425,7 +1676,7 @@ NTSTATUS WINAPI NtQueryInformationProcess( HANDLE handle, PROCESSINFOCLASS class
+@@ -1425,7 +1626,7 @@ NTSTATUS WINAPI NtQueryInformationProcess( HANDLE handle, PROCESSINFOCLASS class
          len = sizeof(ULONG_PTR);
          if (size != len) return STATUS_INFO_LENGTH_MISMATCH;
          if (handle == GetCurrentProcess())

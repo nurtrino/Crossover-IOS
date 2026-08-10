@@ -13,13 +13,14 @@
 # process object. That is authoritative and independent of how any particular
 # parent propagates exit codes.
 #
-# The child image is an import-free PE (mkexe). Images that import DLLs still
-# need per-process PE-side loader state; they are refused rather than run, and
-# that boundary is asserted too so it stays visible.
+# Children go through the real PE-side loader: loader_init gives each
+# pseudo-process its own loader state (0003g), so a child builds its own module
+# list, loads its own imports and runs process attach. Both an import-free PE
+# (mkexe) and real DLL-importing programs are covered.
 #
-# Known gap (documented, not asserted): when a parent's own work depends on a
-# refused DLL-importing child (e.g. wineboot's prefix update), the parent can
-# fail even though the in-process child itself ran correctly.
+# Known gap (documented, not asserted): heavy multi-child workloads — notably
+# creating a Wine prefix from cold, which spawns a tree of wineboot helpers —
+# still crash under WINE_INPROC_RUN. Simple console programs work.
 set -u
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -66,7 +67,7 @@ for code in 7 42 123; do
         "$wine" "$cmd" /c "exit$code.exe" >"$log" 2>&1
     hostrc=$?
 
-    grep -q "in-process child image mapped: L\"C:\\\\\\\\windows\\\\\\\\system32\\\\\\\\exit$code.exe\"" "$log" \
+    grep -q "image mapped: .*exit$code\.exe\" base=" "$log" \
         || { cat "$log"; fail "child did not map its own image (code $code)"; }
     grep -q "in-process child entering PE" "$log" \
         || { cat "$log"; fail "child was not entered in-process (code $code)"; }
@@ -80,13 +81,29 @@ for code in 7 42 123; do
     echo "  exit $code: fork=$forkrc, in-process child ran and server recorded exit_code=$code"
 done
 
-echo "boundary: an image needing the PE-side loader is refused, not crashed"
-WINE_INPROC_SPAWN=1 WINE_INPROC_RUN=1 WINEPREFIX="$prefix" WINEDEBUG=-all timeout 90 \
-    "$wine" wineboot.exe >"$log" 2>&1
-hostrc=$?
-grep -q "needs the PE-side loader; not entered" "$log" \
-    || { cat "$log"; fail "a DLL-importing child was not refused"; }
-[ "$hostrc" -lt 128 ] || fail "host died with signal $((hostrc - 128)) on a refused child"
-echo "  ok: refused cleanly, host survived (rc=$hostrc)"
+echo "DLL-importing children run in-process too"
 
-echo "PASS: in-process children execute their own programs and exit with real codes"
+# nested cmd.exe: a heavy DLL user, checked by exit code against the fork backend
+WINEPREFIX="$prefix" WINEDEBUG=-all timeout 60 \
+    "$wine" "$cmd" /c cmd /c exit 7 >/dev/null 2>&1
+forkrc=$?
+WINE_INPROC_SPAWN=1 WINE_INPROC_RUN=1 WINEPREFIX="$prefix" WINEDEBUG=-all timeout 60 \
+    "$wine" "$cmd" /c cmd /c exit 7 >"$log" 2>&1
+inprocrc=$?
+grep -q 'image mapped: .*cmd\.exe" base=' "$log" \
+    || { cat "$log"; fail "nested cmd was not run as an in-process child"; }
+[ "$forkrc" = 7 ] || fail "fork backend nested cmd returned $forkrc, expected 7"
+[ "$inprocrc" = 7 ] || { cat "$log"; fail "in-process nested cmd returned $inprocrc, expected 7"; }
+echo "  nested cmd.exe: fork=$forkrc in-process=$inprocrc  match"
+
+# attrib.exe: output compared against the fork backend
+forkout=$(WINEPREFIX="$prefix" WINEDEBUG=-all timeout 60 \
+    "$wine" "$cmd" /c 'attrib.exe c:\' 2>/dev/null | head -1)
+inprocout=$(WINE_INPROC_SPAWN=1 WINE_INPROC_RUN=1 WINEPREFIX="$prefix" WINEDEBUG=-all timeout 60 \
+    "$wine" "$cmd" /c 'attrib.exe c:\' 2>/dev/null | grep -v "^wine: in-process" | head -1)
+[ -n "$forkout" ] || fail "fork backend produced no attrib output"
+[ "$forkout" = "$inprocout" ] \
+    || fail "attrib output differs: fork=[$forkout] in-process=[$inprocout]"
+echo "  attrib.exe: output identical to the fork backend"
+
+echo "PASS: in-process children — import-free and DLL-importing — run and match the fork backend"

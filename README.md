@@ -23,7 +23,9 @@ permanently — the App Store is not the target. Full engineering plan:
 
 ## Status
 
-**Phase 2 — the server half of milestone M1 is proven on real Wine.**
+**Phase 2 — both halves of milestone M1's mechanism work on real Wine:**
+**wineserver as a thread, and Windows processes as in-process thread groups
+running real DLL-importing programs.**
 
 Real, tested results (host-first on Linux, against genuine wine-11.0):
 
@@ -54,10 +56,15 @@ deterministic, zero regression on the fork backend.
 own PE entry point and exits with its own exit code — verified for several
 exit codes against the server's own trace, with the fork backend as control.
 
-**What's left for M1**: children that import DLLs. Running those needs
-per-process instancing of ntdll's PE-side loader state (and private data
-segments per DLL); until then such children are refused and logged rather
-than run, so the host stays up. Ledger in
+**Programs that use DLLs run too.** ntdll's PE-side loader state is now
+per-pseudo-process, so a child builds its own module list, loads its own
+imports and runs process attach: nested `cmd.exe` returns its exit code
+in-process and `attrib.exe` output matches the fork backend exactly.
+
+**What's left for M1**: cold-prefix `wineboot` (a tree of helper processes)
+still crashes under the flag, some Win32 APIs still fail inside a child, and
+DLL data-segment isolation between pseudo-processes is not yet asserted. The
+in-process backend therefore stays opt-in. Details in
 [`docs/DESIGN-0003-inproc-spawn.md`](docs/DESIGN-0003-inproc-spawn.md).
 iOS bring-up (M2) additionally needs a macOS + iOS SDK toolchain to
 cross-compile for ARM64. See [`docs/ROADMAP.md`](docs/ROADMAP.md).
