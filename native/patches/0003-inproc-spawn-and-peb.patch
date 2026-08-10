@@ -195,7 +195,7 @@ index cb700dd8..95d6b05f 100644
      return status;
  }
 diff --git a/dlls/ntdll/unix/process.c b/dlls/ntdll/unix/process.c
-index 4c2e7eba..823d2611 100644
+index 4c2e7eba..75aebfbb 100644
 --- a/dlls/ntdll/unix/process.c
 +++ b/dlls/ntdll/unix/process.c
 @@ -33,6 +33,7 @@
@@ -232,7 +232,7 @@ index 4c2e7eba..823d2611 100644
                  params->ConsoleHandle == CONSOLE_HANDLE_ALLOC ||
                  params->ConsoleHandle == CONSOLE_HANDLE_ALLOC_NO_WINDOW ||
                  params->ConsoleHandle == NULL)
-@@ -464,6 +468,194 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
+@@ -464,6 +468,253 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
  }
  
  
@@ -253,6 +253,46 @@ index 4c2e7eba..823d2611 100644
 + * docs/DESIGN-0003-inproc-spawn.md. Until they land this backend is a wired
 + * but unimplemented seam.
 + */
++/***********************************************************************
++ *           image_needs_loader
++ *
++ * True if a mapped image has an import directory, i.e. it needs ntdll's
++ * PE-side loader to resolve DLLs. A second Windows process in one address
++ * space cannot do that yet (loader_init's imports_fixup_done/attach_done are
++ * process-globals; see docs/DESIGN-0003-inproc-spawn.md). Import-free images
++ * can be entered directly and correctly, so this is the gate between what an
++ * in-process child can run today and what awaits loader instancing.
++ */
++static BOOL image_needs_loader( const void *base )
++{
++    const IMAGE_DOS_HEADER *dos = base;
++    const IMAGE_NT_HEADERS *nt;
++    const IMAGE_DATA_DIRECTORY *dir;
++    DWORD count;
++
++    if (!base || dos->e_magic != IMAGE_DOS_SIGNATURE) return TRUE;
++    nt = (const IMAGE_NT_HEADERS *)((const char *)base + dos->e_lfanew);
++    if (nt->Signature != IMAGE_NT_SIGNATURE) return TRUE;
++
++    if (nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC)
++    {
++        const IMAGE_OPTIONAL_HEADER64 *opt = (const IMAGE_OPTIONAL_HEADER64 *)&nt->OptionalHeader;
++        count = opt->NumberOfRvaAndSizes;
++        dir = opt->DataDirectory;
++    }
++    else if (nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC)
++    {
++        const IMAGE_OPTIONAL_HEADER32 *opt = (const IMAGE_OPTIONAL_HEADER32 *)&nt->OptionalHeader;
++        count = opt->NumberOfRvaAndSizes;
++        dir = opt->DataDirectory;
++    }
++    else return TRUE;
++
++    if (count <= IMAGE_DIRECTORY_ENTRY_IMPORT) return FALSE;
++    return !!dir[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
++}
++
++
 +static void *inproc_process_thread( void *arg )
 +{
 +    TEB *teb = arg;
@@ -299,12 +339,26 @@ index 4c2e7eba..823d2611 100644
 +     * long tail (docs/DESIGN-0003-inproc-spawn.md "per-process DLL globals").
 +     * Gated so the tested attach+map path above cannot regress while that
 +     * work proceeds. */
-+    if (!status && getenv( "WINE_INPROC_RUN" ))
++    if (!status && getenv( "WINE_INPROC_RUN" ) &&
++        !image_needs_loader( current_peb()->ImageBaseAddress ))
 +    {
++        /* SkipLoaderInit is Wine's own mechanism for entering a thread without
++         * running the PE-side loader (THREAD_CREATE_FLAGS_SKIP_LOADER_INIT).
++         * The child needs it because loader_init's imports_fixup_done /
++         * attach_done statics are already set by the parent, so a second
++         * process falls into the thread-attach branch and dies on a NULL
++         * modref for its own (unregistered) image. With it set, the child
++         * reaches its PE entry through the normal RtlUserThreadStart path.
++         * This runs import-free images correctly; images that need DLLs still
++         * need per-process loader instancing (the long tail). */
++        teb->SkipLoaderInit = TRUE;
 +        MESSAGE( "wine: in-process child entering PE (WINE_INPROC_RUN)\n" );
 +        signal_start_thread( current_image_info()->TransferAddress, current_peb(), FALSE, teb );
 +        /* not reached */
 +    }
++    else if (!status && getenv( "WINE_INPROC_RUN" ))
++        MESSAGE( "wine: in-process child needs the PE-side loader; not entered "
++                 "(see docs/DESIGN-0003-inproc-spawn.md)\n" );
 +
 +    /* Detach cleanly: closing the thread/process fds is the same death signal
 +     * a real child's exit gives the server, so the process object is reaped
@@ -351,8 +405,13 @@ index 4c2e7eba..823d2611 100644
 +        return STATUS_NO_MEMORY;
 +    }
 +    *child_peb = *current_peb();
-+    child_peb->LdrData           = NULL;  /* built by the child's PE-side loader */
-+    child_peb->ProcessParameters = NULL;  /* built by init_startup_info_inproc */
++    /* ProcessParameters becomes the child's own in init_startup_info_inproc.
++     * LdrData is deliberately INHERITED: this is the shared-ntdll model from
++     * docs/DESIGN-0003-inproc-spawn.md — the child runs on the parent's
++     * already-initialized ntdll and loads nothing of its own, so it starts
++     * from the parent's module list (which the entry path walks). Per-process
++     * module lists arrive with PE-side loader instancing. */
++    child_peb->ProcessParameters = NULL;
 +
 +    /* the child's own main-image info: its EXE, not the parent's */
 +    child_image_info = anon_mmap_alloc( page_size, PROT_READ | PROT_WRITE );
@@ -427,7 +486,7 @@ index 4c2e7eba..823d2611 100644
  /***********************************************************************
   *           __wine_unix_spawnvp
   */
-@@ -591,7 +783,7 @@ static NTSTATUS fork_and_exec( OBJECT_ATTRIBUTES *attr, const char *unix_name, i
+@@ -591,7 +842,7 @@ static NTSTATUS fork_and_exec( OBJECT_ATTRIBUTES *attr, const char *unix_name, i
          {
              close( fd[0] );
  
@@ -436,7 +495,7 @@ index 4c2e7eba..823d2611 100644
                  params->ConsoleHandle == CONSOLE_HANDLE_ALLOC ||
                  params->ConsoleHandle == CONSOLE_HANDLE_ALLOC_NO_WINDOW ||
                  params->ConsoleHandle == NULL)
-@@ -1425,7 +1617,7 @@ NTSTATUS WINAPI NtQueryInformationProcess( HANDLE handle, PROCESSINFOCLASS class
+@@ -1425,7 +1676,7 @@ NTSTATUS WINAPI NtQueryInformationProcess( HANDLE handle, PROCESSINFOCLASS class
          len = sizeof(ULONG_PTR);
          if (size != len) return STATUS_INFO_LENGTH_MISMATCH;
          if (handle == GetCurrentProcess())

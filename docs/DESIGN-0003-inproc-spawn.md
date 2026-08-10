@@ -292,19 +292,82 @@ children attach in-process **and** map their own main image —
 `L"C:\windows\system32\wineboot.exe"` with real base and entry addresses — and
 the server's `-d1` trace still counts 3 handshakes. Fork backend unchanged.
 
+## Status: 0003f landed (2026-08-10) — the child runs
+
+An in-process child now **executes its own program** and exits with its own
+exit code. The whole chain runs with no fork/exec in the child's creation:
+`CreateProcess` → thread group → child PEB/TEB + own socket → own startup info
+→ own mapped+relocated EXE → **PE entry executed** → real exit code.
+
+Two changes made it work:
+
+- **`SkipLoaderInit`.** `loader_init`'s `imports_fixup_done` and `attach_done`
+  are process-globals already set by the parent, so a second process falls
+  into the thread-attach branch and dies on a NULL modref for its own
+  (unregistered) image. Wine's own `SkipLoaderInit` (used by
+  `THREAD_CREATE_FLAGS_SKIP_LOADER_INIT`) makes `loader_init` return
+  immediately, so the child reaches its PE entry through the normal
+  `RtlUserThreadStart` path.
+- **`LdrData` is inherited, not blanked.** This is the shared-ntdll model
+  taken to its conclusion: a child that loads nothing of its own starts from
+  the parent's module list, which the entry path walks. Blanking it faulted at
+  `[NULL+0x38]`.
+
+**The gate.** `image_needs_loader()` checks the child image's import directory.
+Import-free images are entered and run correctly; images that import DLLs are
+**refused and logged**, not entered — before this gate a DLL-importing child
+faulted and took the whole host down with SIGSEGV. `WINE_INPROC_RUN` is
+therefore safe to enable generally: worst case a child does not run.
+
+**Evidence** (`inproc_run_test.sh`, deterministic over repeated runs): for exit
+codes 7/42/123 the child maps its own `exitN.exe`, enters its PE, and the
+**server's own `-d1` trace** records `*killed* exit_code=N` for the child
+process object — the same authoritative method as experiment 004. The fork
+backend is the control and returns the same codes end to end.
+
+Server-side evidence is used deliberately rather than the parent's exit code.
+Both were measured: the child's own exit code is correct in **every** run,
+while propagation through a parent is currently entangled with the boundary
+below.
+
+### Known gap: parents that depend on a refused child
+
+If a parent's own work depends on a DLL-importing child (the common case:
+Wine spawning `wineboot` for a prefix update), that child is refused, the work
+silently does not happen, and the *parent* can fail even though every child
+that did run ran correctly. This is a consequence of the loader boundary, not
+a defect in the child-run path, and it disappears when DLL-importing children
+can run. Measured: with a settled prefix and no refused children, propagation
+through `cmd /c exitN.exe` returns N correctly.
+
 ### What is genuinely left for M1
 
-Entering the child's PE. The jump is wired and reachable behind
-`WINE_INPROC_RUN` (`signal_start_thread( current_image_info()->TransferAddress,
-current_peb(), FALSE, teb )`); it runs without destabilizing the host but the
-child produces nothing, because entering the image runs `LdrInitializeThunk` —
-ntdll's **PE-side** loader — for a second Windows process in one address
-space. The PE side reads `NtCurrentTeb()->Peb->LdrData`, so the child's module
-list is per-process for free, but the PE-side loader's own statics (module
-hash table, load counts, per-DLL init state) still alias across
-pseudo-processes. That is the "per-process DLL globals" long tail in Risks
-below, now the single remaining blocker rather than one of four. It is kept
-behind a flag so the tested attach+map path cannot regress while it proceeds.
+**Per-process PE-side loader state** — running children that import DLLs.
+Everything else in M1's client half is done and tested: the spawn seam, the
+three process-globals, the attach, the child's own startup info and image, and
+execution of import-free programs.
+
+The remaining work is bounded and named. `dlls/ntdll/loader.c` keeps the
+loader's state in process-globals that must become per-pseudo-process before
+a second process can load DLLs:
+
+| state | what it is |
+|---|---|
+| `imports_fixup_done`, `attach_done` | one-shot gates in `loader_init` |
+| `ldr` (`PEB_LDR_DATA`), `hash_table` | the module list and its index |
+| `tls_bitmap`, `tls_expansion_bitmap`, `tls_dirs` | TLS slot allocation |
+| `node_ntdll`, `node_kernel32`, `pBaseThreadInitThunk` | resolved system-DLL handles |
+| `loader_section`, `peb_lock`, `default_load_path` | loader lock and search path |
+
+Note `peb->LdrData` and friends are *assigned from* these statics in
+`loader_init`, so per-process instancing is mostly a matter of allocating that
+set per pseudo-process and pointing the child's PEB at its own copy — the same
+`current_x()` shape used three times already. The genuinely open question is
+not the bookkeeping but **DLL data segments**: two pseudo-processes sharing one
+mapped `kernel32` share its mutable globals, where real Windows would give
+each a private copy-on-write view. Mapping a second private copy per
+pseudo-process (PE relocation already proven by `peload_test`) is the
+principled fix and the last real research item in Blocker 1.
 
 ## Risks / open questions
 

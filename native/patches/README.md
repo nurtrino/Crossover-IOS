@@ -73,22 +73,22 @@ scoped as series 0003 in `docs/DESIGN-0003-inproc-spawn.md`.
 
 ### 0003-inproc-spawn-and-peb.patch
 
-The in-process-launch groundwork (stages a + b of series 0003). Default
-behavior is byte-for-byte unchanged; the new paths are opt-in / equivalent.
+Series 0003 in full (stages a–f): `CreateProcess` without fork/exec. Default
+behavior is byte-for-byte unchanged — every new path is opt-in behind
+`WINE_INPROC_SPAWN` / `WINE_INPROC_RUN` or is an equivalent indirection.
 
 - **Stage a — spawn seam** (`dlls/ntdll/unix/process.c`): `spawn_process` is
   split into `spawn_process_fork` (the classic backend, unchanged) and
   `spawn_process_inproc` (the future in-address-space launch), dispatched on
-  `WINE_INPROC_SPAWN`. The in-process backend is wired but returns
-  `STATUS_NOT_IMPLEMENTED` until the PE loader (stage c) and child
-  `init_first_thread` (stage d) land.
+  `WINE_INPROC_SPAWN`.
 - **Stage b — PEB indirection** (`dlls/ntdll/unix/unix_private.h`,
   `process.c`): add `current_peb()` = `NtCurrentTeb()->Peb`, the hook for
   per-pseudo-process PEBs, and convert `process.c`'s post-init global-`peb`
   uses to it. Since `init_teb` sets `teb->Peb = peb` for the primary process,
   this is a zero-behavior-change step. The full file-by-file conversion
   ledger (81 uses / 10 files) is in `docs/DESIGN-0003-inproc-spawn.md`.
-
+- **Stage c — in-address-space PE mapping**: proven standalone by
+  `native/wineforge/peload_test` (map + relocate + run, two images coexisting).
 - **Stage d — the attach** (`process.c`, `server.c`): `spawn_process_inproc`
   launches the child as a thread group in the same host process — child PEB
   (template-copied) + TEB, its own server socket in the PEB-keyed registry,
@@ -102,9 +102,15 @@ behavior is byte-for-byte unchanged; the new paths are opt-in / equivalent.
   split out because `init_process_done` makes the server drop the staged
   startup info — it must come *after* `get_startup_info`.
 
+- **Stage f — the child runs** (`process.c`): the child enters its PE via
+  Wine's `SkipLoaderInit` with an inherited (shared-ntdll) module list, and
+  `image_needs_loader()` gates entry on the image's import directory so
+  DLL-importing children are refused rather than faulting the host.
+
 Validated by `native/wineforge/spawn_seam_test.sh` (both dispatch directions,
-plus server-side handshake counts and per-child image mapping) and the whole
-wineforge suite staying green.
+server-side handshake counts, per-child image mapping) and
+`inproc_run_test.sh` (children execute and exit with real codes, proved from
+the server's own trace), with the whole wineforge suite staying green.
 
 ### Regenerating a patch — read this first
 

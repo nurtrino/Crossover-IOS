@@ -23,7 +23,7 @@ WINESERVER_BIN ?= $(abspath $(WINE_BUILD))/server/wineserver
 
 all: $(BUILD)/server/embed_test $(BUILD)/server/embed_run_test \
      $(BUILD)/server/real_client_test $(BUILD)/server/real_multi_test \
-     $(BUILD)/peload_test $(BUILD)/nls
+     $(BUILD)/peload_test $(BUILD)/mkexe $(BUILD)/nls
 
 $(BUILD)/server:
 	mkdir -p $(BUILD)/server
@@ -56,6 +56,11 @@ $(BUILD)/server/real_multi_test: real_multi_test.c $(BUILD)/server/main_lib.o $(
 $(BUILD)/peload_test: peload_test.c | $(BUILD)/server
 	$(CC) $(CFLAGS) -o $@ peload_test.c
 
+# Emits an import-free Win64 .exe: the program an in-process child can run
+# today (experiment 0003f). No wine objects needed.
+$(BUILD)/mkexe: mkexe.c | $(BUILD)/server
+	$(CC) $(CFLAGS) -o $@ mkexe.c
+
 test: all
 	$(BUILD)/server/embed_test
 	$(BUILD)/server/embed_run_test
@@ -68,6 +73,7 @@ test-real: $(BUILD)/server/real_client_test $(BUILD)/server/real_multi_test $(BU
 	$(BUILD)/server/real_multi_test $(WINESERVER_BIN) $(WINE_LOADER) 4 wineboot.exe
 	./embedded_server_test.sh
 	./spawn_seam_test.sh
+	./inproc_run_test.sh
 
 clean:
 	rm -rf $(BUILD)

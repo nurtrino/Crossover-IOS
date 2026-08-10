@@ -50,10 +50,15 @@ base + entry addresses; all three process-globals — `peb`, `fd_socket`,
 `main_image_info` — are now per-pseudo-process). Hard `-d1`-trace evidence,
 deterministic, zero regression on the fork backend.
 
-**What's left for M1** is the last step: *running* the child's image. The
-entry jump is wired behind `WINE_INPROC_RUN`, but executing it needs
-per-process instancing of ntdll's PE-side loader state — the long tail
-scoped in [`docs/DESIGN-0003-inproc-spawn.md`](docs/DESIGN-0003-inproc-spawn.md).
+**The child runs.** Under `WINE_INPROC_RUN` an in-process child executes its
+own PE entry point and exits with its own exit code — verified for several
+exit codes against the server's own trace, with the fork backend as control.
+
+**What's left for M1**: children that import DLLs. Running those needs
+per-process instancing of ntdll's PE-side loader state (and private data
+segments per DLL); until then such children are refused and logged rather
+than run, so the host stays up. Ledger in
+[`docs/DESIGN-0003-inproc-spawn.md`](docs/DESIGN-0003-inproc-spawn.md).
 iOS bring-up (M2) additionally needs a macOS + iOS SDK toolchain to
 cross-compile for ARM64. See [`docs/ROADMAP.md`](docs/ROADMAP.md).
 

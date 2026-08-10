@@ -153,11 +153,37 @@ Findings:
    and `env_size == 0` underflows `env_pos` to `SIZE_MAX`. The child's
    handshake must follow the normal loader's order
    (`init_first_thread` → `get_startup_info` → `init_process_done`).
-9. **The PE-side loader is the last blocker.** Entering the child's image
-   (gated behind `WINE_INPROC_RUN`) runs `LdrInitializeThunk` for a second
-   Windows process in one address space. The module list rides on the PEB and
-   is per-process for free, but the PE-side loader's own statics still alias.
-   That is the whole remaining gap between here and M1.
+9. **The PE-side loader is the last blocker.** Entering the child's image runs
+   `LdrInitializeThunk` for a second Windows process in one address space; the
+   loader's `imports_fixup_done`/`attach_done` gates are already set by the
+   parent, so the child falls into the thread-attach branch and dies on a NULL
+   modref for its own image.
+
+### 0003f — the child RUNS (PASSING)
+
+An in-process child now executes its own program and exits with its own exit
+code. Two pieces: Wine's own `SkipLoaderInit` (so `loader_init` returns and the
+child reaches its PE entry via `RtlUserThreadStart`), and an **inherited**
+`LdrData` — the shared-ntdll model taken to its conclusion, since a child that
+loads nothing starts from the parent's module list. `image_needs_loader()`
+gates entry on the image's import directory.
+
+`inproc_run_test.sh` proves it for exit codes 7/42/123 using the **server's own
+`-d1` trace** (`*killed* exit_code=N`), with the fork backend as the control,
+plus `mkexe` to emit import-free test programs.
+
+Findings:
+
+10. **Server-side evidence beats the parent's exit code.** The child's own exit
+    code is correct in every run; propagation through a parent is entangled
+    with finding 11, so the trace is the authoritative assertion.
+11. **A refused child can fail its parent.** Wine spawns `wineboot` for prefix
+    updates; that child imports DLLs, so it is refused, the update silently
+    does not happen, and the parent fails — even though every child that did
+    run ran correctly. A consequence of the loader boundary, not of the
+    child-run path.
+12. **Gating entry is what makes the flag safe.** Before the import check, a
+    DLL-importing child faulted and took the whole host down with SIGSEGV.
 
 ### Next: client-side process elimination
 

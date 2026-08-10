@@ -65,17 +65,26 @@ Every phase ends with something demonstrable.
         counts the in-process children as first-class processes
         (`spawn_seam_test.sh`: 2 children attach, 3 handshakes, deterministic;
         zero regression on the fork backend)
-  - [~] **0003e: the child's own startup info + image** — `main_image_info`
+  - [x] **0003e: the child's own startup info + image** — `main_image_info`
         virtualized per-pseudo-process (`current_image_info()`, the third and
         last entangled global); `build_startup_info()` parameterised so a
         child fetches its own startup info from the server, builds its own
         process parameters, and maps its own main EXE. Verified: both of
         wineboot's children map `C:\windows\system32\wineboot.exe` with real
         base + entry addresses, deterministic, fork backend regression-free.
-        Remaining for M1: entering the child's PE — wired and reachable
-        behind `WINE_INPROC_RUN`, but running it needs per-process instancing
-        of ntdll's **PE-side loader** state (module list / DLL globals), the
-        long tail named in the design doc
+  - [x] **0003f: the child runs** — an in-process child executes its own PE
+        entry and exits with its own exit code, using Wine's `SkipLoaderInit`
+        plus an inherited (shared-ntdll) module list. `image_needs_loader()`
+        gates entry: import-free images run; DLL-importing images are refused
+        and logged instead of faulting the host. Verified by
+        `inproc_run_test.sh` for exit codes 7/42/123 against the **server's
+        own `-d1` trace** (`*killed* exit_code=N`), fork backend as control,
+        deterministic across repeated runs
+  - Remaining for M1 — **per-process PE-side loader state**: `loader_init`'s
+    one-shot gates, the module list/hash table, TLS bitmaps and resolved
+    system-DLL handles must be instanced per pseudo-process, and DLL data
+    segments need private per-process views (ledger in the design doc). Until
+    then a child that imports DLLs is refused rather than run
 - [ ] M1 complete: `wine notepad.exe` with all fork/exec compiled out,
       single host process
 
