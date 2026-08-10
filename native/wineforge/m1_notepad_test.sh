@@ -10,7 +10,17 @@
 #     in-process CHILD, and that child exits early.
 # So the remaining gap is specifically a GUI child launched through explorer.
 # PE-format DLLs (which fixed hostname.exe and gave each pseudo-process its own
-# kernel32) did NOT fix this one, so the cause is elsewhere.
+# kernel32) did NOT fix this one, so the cause is elsewhere. Located:
+#   0068:err:seh:NtRaiseException Unhandled exception code c0000005 (access
+#   violation) at 0x6fffffc445d5 — that is inside ntdll.dll itself
+#   (base 0x6fffffbf0000, offset ~0x545d5).
+# ntdll is deliberately mapped at ONE base for every pseudo-process (the
+# shared-ntdll model this whole port rests on), so unlike kernel32 it cannot be
+# given a private copy. The fault is therefore in shared PE-side ntdll state
+# that a GUI child reaches and a console child does not. That is the next
+# thing to debug — interactively, with a symbolised ntdll.
+# Good news: the host survives (SEH catches it, rc=5), it is no longer a
+# host-killing SIGSEGV.
 #
 # Note the measurement tension: killing the server between backends is required
 # for the host-process count to mean anything (otherwise the second run
