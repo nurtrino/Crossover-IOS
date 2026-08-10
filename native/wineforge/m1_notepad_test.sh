@@ -17,8 +17,21 @@
 # ntdll is deliberately mapped at ONE base for every pseudo-process (the
 # shared-ntdll model this whole port rests on), so unlike kernel32 it cannot be
 # given a private copy. The fault is therefore in shared PE-side ntdll state
-# that a GUI child reaches and a console child does not. That is the next
-# thing to debug — interactively, with a symbolised ntdll.
+# that a GUI child reaches and a console child does not.
+#
+# LOCATED to an instruction. Disassembling the PE ntdll (preferred ImageBase
+# 0x170000000, so fault RVA 0x545d5 -> 0x1700545d5):
+#     load_dll:
+#     1700545d5:  8b 46 08   mov 0x8(%rsi),%eax
+# a 4-byte read at offset 8 through a bad/NULL pointer, inside load_dll — a
+# function directly touched by patch 0003g (per-pseudo-process loader state).
+# So the prime suspect is our own per-process block rather than anything
+# inherent to sharing ntdll: a field the primary process gets initialised via
+# loader_init's first-time branch which a GUI child reaches before/without
+# initialisation. Candidates in order: the hash_table list heads,
+# cached_modref, node_ntdll/node_kernel32, tls_dirs.
+# Next step is mechanical: build ntdll with symbols, break on load_dll for the
+# child, and see which per-process field is NULL.
 # Good news: the host survives (SEH catches it, rc=5), it is no longer a
 # host-killing SIGSEGV.
 #
