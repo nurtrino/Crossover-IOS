@@ -1,3 +1,4 @@
 0001-embeddable-server-shutdown.patch
 0002-no-fork-embedded-server.patch
 0003-inproc-spawn-and-peb.patch
+0004-inproc-user-session.patch

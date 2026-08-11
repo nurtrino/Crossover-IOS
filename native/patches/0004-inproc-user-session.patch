@@ -1,0 +1,73 @@
+diff --git a/dlls/win32u/class.c b/dlls/win32u/class.c
+index dc1a42b3..975e2890 100644
+--- a/dlls/win32u/class.c
++++ b/dlls/win32u/class.c
+@@ -249,10 +249,50 @@ static void init_user(void)
+ {
+     NtQuerySystemInformation( SystemBasicInformation, &system_info, sizeof(system_info), NULL );
+ 
+-    init_startup_info();
+     shared_session_init();
+     gdi_init();
+     sysparams_init();
++}
++
++/*
++ * Crossover-IOS fork, patch series 0003i: split the user-session init into a
++ * host-wide part and a per-pseudo-process part.
++ *
++ * init_user() used to run everything under one pthread_once. win32u.so is
++ * dlopen'ed once per HOST process, so with several pseudo-processes in one
++ * host only the first ever ran it: every later process skipped
++ * winstation_init() (its thread was left with no desktop — the explorer
++ * /desktop child then failed every window creation with ERROR_INVALID_HANDLE
++ * and the desktop retry-spawn loop never converged), skipped
++ * register_desktop_class() (window classes are per-process on the server),
++ * and skipped its own startup-info snapshot.
++ *
++ * The session-wide pieces (shared session mapping, GDI shared handle table,
++ * display/sysparams state) stay host-wide: on Windows they are per-session,
++ * and all pseudo-processes share one session. The order for the first
++ * process is unchanged from upstream.
++ */
++static void init_user_process(void)
++{
++    static struct { void *peb; } inited_procs[64];
++    static pthread_mutex_t inited_procs_lock = PTHREAD_MUTEX_INITIALIZER;
++    static pthread_once_t init_once = PTHREAD_ONCE_INIT;
++    void *peb = NtCurrentTeb()->Peb;
++    unsigned int i, free_slot = ~0u;
++    BOOL done = FALSE;
++
++    pthread_mutex_lock( &inited_procs_lock );
++    for (i = 0; i < ARRAY_SIZE(inited_procs); i++)
++    {
++        if (inited_procs[i].peb == peb) { done = TRUE; break; }
++        if (free_slot == ~0u && !inited_procs[i].peb) free_slot = i;
++    }
++    if (!done && free_slot != ~0u) inited_procs[free_slot].peb = peb;
++    pthread_mutex_unlock( &inited_procs_lock );
++    if (done) return;
++
++    init_startup_info();
++    pthread_once( &init_once, init_user );
+     winstation_init();
+     register_desktop_class();
+ }
+@@ -265,7 +305,6 @@ NTSTATUS WINAPI NtUserInitializeClientPfnArrays( const ntuser_client_func_ptr *c
+                                                  const ntuser_client_func_ptr *client_workers,
+                                                  HINSTANCE user_module )
+ {
+-    static pthread_once_t init_once = PTHREAD_ONCE_INIT;
+     UINT i;
+ 
+     for (i = 0; i < NTUSER_NB_PROCS; i++)
+@@ -275,7 +314,7 @@ NTSTATUS WINAPI NtUserInitializeClientPfnArrays( const ntuser_client_func_ptr *c
+     }
+     user32_module = user_module;
+ 
+-    pthread_once( &init_once, init_user );
++    init_user_process();
+     return STATUS_SUCCESS;
+ }
+ 

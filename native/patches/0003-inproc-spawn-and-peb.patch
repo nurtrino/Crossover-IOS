@@ -400,7 +400,7 @@ index cb700dd8..95d6b05f 100644
      return status;
  }
 diff --git a/dlls/ntdll/unix/process.c b/dlls/ntdll/unix/process.c
-index 4c2e7eba..58432823 100644
+index 4c2e7eba..00d89cfd 100644
 --- a/dlls/ntdll/unix/process.c
 +++ b/dlls/ntdll/unix/process.c
 @@ -33,6 +33,7 @@
@@ -437,7 +437,7 @@ index 4c2e7eba..58432823 100644
                  params->ConsoleHandle == CONSOLE_HANDLE_ALLOC ||
                  params->ConsoleHandle == CONSOLE_HANDLE_ALLOC_NO_WINDOW ||
                  params->ConsoleHandle == NULL)
-@@ -464,6 +468,230 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
+@@ -464,6 +468,244 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
  }
  
  
@@ -526,6 +526,7 @@ index 4c2e7eba..58432823 100644
 +    if (data->wait_fd[1] != -1) close( data->wait_fd[1] );
 +    set_process_server_fd( child_peb, -1 );
 +    set_process_image_info( child_peb, NULL );
++    release_process_fd_cache( child_peb );
 +    if (socketfd != -1) close( socketfd );
 +    /* the TEB (and its kernel stack, which is this pthread's stack) is
 +     * deliberately leaked: freeing it out from under a live thread is worse.
@@ -581,6 +582,18 @@ index 4c2e7eba..58432823 100644
 +    set_process_server_fd( child_peb, fd );
 +    set_process_image_info( child_peb, child_image_info );
 +
++    /* 0003i: the child's handle values are its own, so its handle->unix-fd
++     * cache must be too — a shared cache aliases siblings' handles */
++    if ((status = alloc_process_fd_cache( child_peb )))
++    {
++        set_process_server_fd( child_peb, -1 );
++        set_process_image_info( child_peb, NULL );
++        munmap( child_image_info, page_size );
++        munmap( child_peb, page_size );
++        close( fd );
++        return status;
++    }
++
 +    pthread_sigmask( SIG_BLOCK, &server_block_set, &sigset );
 +
 +    if ((status = virtual_alloc_teb( &teb ))) goto failed;
@@ -615,6 +628,7 @@ index 4c2e7eba..58432823 100644
 +    pthread_sigmask( SIG_SETMASK, &sigset, NULL );
 +    set_process_server_fd( child_peb, -1 );
 +    set_process_image_info( child_peb, NULL );
++    release_process_fd_cache( child_peb );
 +    munmap( child_image_info, page_size );
 +    munmap( child_peb, page_size );
 +    close( fd );
@@ -668,7 +682,7 @@ index 4c2e7eba..58432823 100644
  /***********************************************************************
   *           __wine_unix_spawnvp
   */
-@@ -591,7 +819,7 @@ static NTSTATUS fork_and_exec( OBJECT_ATTRIBUTES *attr, const char *unix_name, i
+@@ -591,7 +833,7 @@ static NTSTATUS fork_and_exec( OBJECT_ATTRIBUTES *attr, const char *unix_name, i
          {
              close( fd[0] );
  
@@ -677,7 +691,7 @@ index 4c2e7eba..58432823 100644
                  params->ConsoleHandle == CONSOLE_HANDLE_ALLOC ||
                  params->ConsoleHandle == CONSOLE_HANDLE_ALLOC_NO_WINDOW ||
                  params->ConsoleHandle == NULL)
-@@ -1425,7 +1653,7 @@ NTSTATUS WINAPI NtQueryInformationProcess( HANDLE handle, PROCESSINFOCLASS class
+@@ -1425,7 +1667,7 @@ NTSTATUS WINAPI NtQueryInformationProcess( HANDLE handle, PROCESSINFOCLASS class
          len = sizeof(ULONG_PTR);
          if (size != len) return STATUS_INFO_LENGTH_MISMATCH;
          if (handle == GetCurrentProcess())
@@ -687,7 +701,7 @@ index 4c2e7eba..58432823 100644
          {
              ULONG_PTR val = 0;
 diff --git a/dlls/ntdll/unix/server.c b/dlls/ntdll/unix/server.c
-index 258a959d..dc52537f 100644
+index 258a959d..13e1d2bc 100644
 --- a/dlls/ntdll/unix/server.c
 +++ b/dlls/ntdll/unix/server.c
 @@ -106,6 +106,59 @@ static int initial_cwd = -1;
@@ -768,7 +782,189 @@ index 258a959d..dc52537f 100644
          {
              struct cmsghdr *cmsg;
              for (cmsg = CMSG_FIRSTHDR( &msghdr ); cmsg; cmsg = CMSG_NXTHDR( &msghdr, cmsg ))
-@@ -1622,6 +1675,11 @@ size_t server_init_process(void)
+@@ -1053,9 +1106,111 @@ C_ASSERT( sizeof(union fd_cache_entry) == sizeof(LONG64) );
+ #define FD_CACHE_BLOCK_SIZE  (65536 / sizeof(union fd_cache_entry))
+ #define FD_CACHE_ENTRIES     128
+ 
+-static union fd_cache_entry *fd_cache[FD_CACHE_ENTRIES];
++/*
++ * Crossover-IOS fork, patch series 0003i: per-pseudo-process fd cache.
++ *
++ * The fd cache maps handle values to received unix fds. Handle values are
++ * per-process on the server, so with several pseudo-processes in one host a
++ * single handle-keyed cache aliases them: the child's handle 0x40 hits the
++ * fd the parent cached for a DIFFERENT object 0x40, and the child then reads
++ * (or maps) the wrong file. This was the M1 GUI-child crash: the child's
++ * kernel32 section mapped from a stale sibling fd, producing an image with
++ * no PE header (docs/DESIGN-0003-inproc-spawn.md).
++ *
++ * So the cache is instanced per pseudo-process, keyed on the PEB like the
++ * per-process server socket above. The primary process keeps the static
++ * instance (bit-for-bit prior behaviour); in-process children register a
++ * fresh cache in spawn_process_inproc before their first thread runs.
++ * Readers scan lock-free (slots are published with a release store of the
++ * PEB after the cache pointer is in place, and are only reused after the
++ * owning pseudo-process is done with them); writers serialize on a mutex.
++ */
++struct fd_cache_proc
++{
++    union fd_cache_entry *blocks[FD_CACHE_ENTRIES];
++};
++
++static struct fd_cache_proc primary_fd_cache;
+ static union fd_cache_entry fd_cache_initial_block[FD_CACHE_BLOCK_SIZE];
+ 
++static struct { PEB *peb; struct fd_cache_proc *cache; } proc_fd_caches[MAX_PROC_FDS];
++static pthread_mutex_t proc_fd_caches_lock = PTHREAD_MUTEX_INITIALIZER;
++
++static struct fd_cache_proc *current_fd_cache(void)
++{
++    PEB *cur = current_peb();
++    unsigned int i;
++
++    for (i = 0; i < MAX_PROC_FDS; i++)
++        if (__atomic_load_n( &proc_fd_caches[i].peb, __ATOMIC_ACQUIRE ) == cur)
++            return proc_fd_caches[i].cache;
++    return &primary_fd_cache;  /* the primary process never registers */
++}
++
++NTSTATUS alloc_process_fd_cache( PEB *owner )
++{
++    struct fd_cache_proc *cache;
++    int free_slot = -1;
++    unsigned int i;
++
++    cache = anon_mmap_alloc( (sizeof(*cache) + page_size - 1) & ~(page_size - 1),
++                             PROT_READ | PROT_WRITE );
++    if (cache == MAP_FAILED) return STATUS_NO_MEMORY;
++
++    pthread_mutex_lock( &proc_fd_caches_lock );
++    for (i = 0; i < MAX_PROC_FDS; i++)
++    {
++        if (proc_fd_caches[i].peb == owner) { free_slot = -1; break; }  /* already registered */
++        if (free_slot == -1 && !proc_fd_caches[i].peb) free_slot = i;
++    }
++    if (free_slot != -1)
++    {
++        proc_fd_caches[free_slot].cache = cache;
++        __atomic_store_n( &proc_fd_caches[free_slot].peb, owner, __ATOMIC_RELEASE );
++    }
++    pthread_mutex_unlock( &proc_fd_caches_lock );
++
++    if (free_slot == -1)
++    {
++        munmap( cache, (sizeof(*cache) + page_size - 1) & ~(page_size - 1) );
++        return (i < MAX_PROC_FDS) ? STATUS_SUCCESS : STATUS_TOO_MANY_OPENED_FILES;
++    }
++    return STATUS_SUCCESS;
++}
++
++void release_process_fd_cache( PEB *owner )
++{
++    struct fd_cache_proc *cache = NULL;
++    unsigned int i, entry, idx;
++
++    pthread_mutex_lock( &proc_fd_caches_lock );
++    for (i = 0; i < MAX_PROC_FDS; i++)
++    {
++        if (proc_fd_caches[i].peb != owner) continue;
++        cache = proc_fd_caches[i].cache;
++        __atomic_store_n( &proc_fd_caches[i].peb, NULL, __ATOMIC_RELEASE );
++        proc_fd_caches[i].cache = NULL;
++        break;
++    }
++    pthread_mutex_unlock( &proc_fd_caches_lock );
++
++    if (!cache) return;
++    /* only called once the owning pseudo-process has no running threads (or
++     * before its first thread starts, on a failed spawn), so no lookups race
++     * with tearing the cache down */
++    for (entry = 0; entry < FD_CACHE_ENTRIES; entry++)
++    {
++        if (!cache->blocks[entry]) continue;
++        for (idx = 0; idx < FD_CACHE_BLOCK_SIZE; idx++)
++        {
++            union fd_cache_entry fdc = cache->blocks[entry][idx];
++            if (fdc.data && fdc.s.type != FD_TYPE_INVALID) close( fdc.s.fd - 1 );
++        }
++        munmap( cache->blocks[entry], FD_CACHE_BLOCK_SIZE * sizeof(union fd_cache_entry) );
++    }
++    munmap( cache, (sizeof(*cache) + page_size - 1) & ~(page_size - 1) );
++}
++
+ static inline unsigned int handle_to_index( HANDLE handle, unsigned int *entry )
+ {
+     unsigned int idx = (wine_server_obj_handle(handle) >> 2) - 1;
+@@ -1072,6 +1227,7 @@ static inline unsigned int handle_to_index( HANDLE handle, unsigned int *entry )
+ static BOOL add_fd_to_cache( HANDLE handle, int fd, enum server_fd_type type,
+                             unsigned int access, unsigned int options )
+ {
++    struct fd_cache_proc *fd_cache = current_fd_cache();
+     unsigned int entry, idx = handle_to_index( handle, &entry );
+     union fd_cache_entry cache;
+ 
+@@ -1081,15 +1237,15 @@ static BOOL add_fd_to_cache( HANDLE handle, int fd, enum server_fd_type type,
+         return FALSE;
+     }
+ 
+-    if (!fd_cache[entry])  /* do we need to allocate a new block of entries? */
++    if (!fd_cache->blocks[entry])  /* do we need to allocate a new block of entries? */
+     {
+-        if (!entry) fd_cache[0] = fd_cache_initial_block;
++        if (!entry && fd_cache == &primary_fd_cache) fd_cache->blocks[0] = fd_cache_initial_block;
+         else
+         {
+             void *ptr = anon_mmap_alloc( FD_CACHE_BLOCK_SIZE * sizeof(union fd_cache_entry),
+                                          PROT_READ | PROT_WRITE );
+             if (ptr == MAP_FAILED) return FALSE;
+-            fd_cache[entry] = ptr;
++            fd_cache->blocks[entry] = ptr;
+         }
+     }
+ 
+@@ -1098,7 +1254,7 @@ static BOOL add_fd_to_cache( HANDLE handle, int fd, enum server_fd_type type,
+     cache.s.type = type;
+     cache.s.access = access;
+     cache.s.options = options;
+-    cache.data = interlocked_xchg64( &fd_cache[entry][idx].data, cache.data );
++    cache.data = interlocked_xchg64( &fd_cache->blocks[entry][idx].data, cache.data );
+     assert( !cache.s.fd );
+     return TRUE;
+ }
+@@ -1110,12 +1266,13 @@ static BOOL add_fd_to_cache( HANDLE handle, int fd, enum server_fd_type type,
+ static inline NTSTATUS get_cached_fd( HANDLE handle, int *fd, enum server_fd_type *type,
+                                       unsigned int *access, unsigned int *options )
+ {
++    struct fd_cache_proc *fd_cache = current_fd_cache();
+     unsigned int entry, idx = handle_to_index( handle, &entry );
+     union fd_cache_entry cache;
+ 
+-    if (entry >= FD_CACHE_ENTRIES || !fd_cache[entry]) return STATUS_INVALID_HANDLE;
++    if (entry >= FD_CACHE_ENTRIES || !fd_cache->blocks[entry]) return STATUS_INVALID_HANDLE;
+ 
+-    cache.data = InterlockedCompareExchange64( &fd_cache[entry][idx].data, 0, 0 );
++    cache.data = InterlockedCompareExchange64( &fd_cache->blocks[entry][idx].data, 0, 0 );
+     if (!cache.data) return STATUS_INVALID_HANDLE;
+ 
+     /* if fd type is invalid, fd stores an error value */
+@@ -1134,13 +1291,14 @@ static inline NTSTATUS get_cached_fd( HANDLE handle, int *fd, enum server_fd_typ
+  */
+ static int remove_fd_from_cache( HANDLE handle )
+ {
++    struct fd_cache_proc *fd_cache = current_fd_cache();
+     unsigned int entry, idx = handle_to_index( handle, &entry );
+     int fd = -1;
+ 
+-    if (entry < FD_CACHE_ENTRIES && fd_cache[entry])
++    if (entry < FD_CACHE_ENTRIES && fd_cache->blocks[entry])
+     {
+         union fd_cache_entry cache;
+-        cache.data = interlocked_xchg64( &fd_cache[entry][idx].data, 0 );
++        cache.data = interlocked_xchg64( &fd_cache->blocks[entry][idx].data, 0 );
+         if (cache.s.type != FD_TYPE_INVALID) fd = cache.s.fd - 1;
+     }
+ 
+@@ -1622,6 +1780,11 @@ size_t server_init_process(void)
          fd_socket = server_connect();
      }
  
@@ -780,7 +976,7 @@ index 258a959d..dc52537f 100644
      /* setup the signal mask */
      sigemptyset( &server_block_set );
      sigaddset( &server_block_set, SIGALRM );
-@@ -1677,7 +1735,7 @@ size_t server_init_process(void)
+@@ -1677,7 +1840,7 @@ size_t server_init_process(void)
              obj_handle_t handle;
              pid               = reply->pid;
              tid               = reply->tid;
@@ -789,7 +985,7 @@ index 258a959d..dc52537f 100644
              info_size         = reply->info_size;
              server_start_time = reply->server_start;
              supported_machines_count = wine_server_reply_size( reply ) / sizeof(*supported_machines);
-@@ -1758,14 +1816,126 @@ void server_init_process_done(void)
+@@ -1758,14 +1921,126 @@ void server_init_process_done(void)
      SERVER_START_REQ( init_process_done )
      {
          req->teb = wine_server_client_ptr( teb );
@@ -918,7 +1114,7 @@ index 258a959d..dc52537f 100644
  }
  
  
-@@ -1952,7 +2122,7 @@ NTSTATUS WINAPI NtClose( HANDLE handle )
+@@ -1952,7 +2227,7 @@ NTSTATUS WINAPI NtClose( HANDLE handle )
      if (fd != -1) close( fd );
  
      if (ret != STATUS_INVALID_HANDLE || !handle) return ret;
@@ -1077,7 +1273,7 @@ index 24cd0587..fff5fb30 100644
                  }
              }
 diff --git a/dlls/ntdll/unix/unix_private.h b/dlls/ntdll/unix/unix_private.h
-index 3932b175..26d18ae3 100644
+index 3932b175..6c0e1e20 100644
 --- a/dlls/ntdll/unix/unix_private.h
 +++ b/dlls/ntdll/unix/unix_private.h
 @@ -75,6 +75,9 @@ static inline TEB64 *NtCurrentTeb64(void) { return (TEB64 *)NtCurrentTeb()->GdiB
@@ -1127,23 +1323,52 @@ index 3932b175..26d18ae3 100644
  extern void *create_startup_info( const UNICODE_STRING *nt_image, ULONG process_flags,
                                    const RTL_USER_PROCESS_PARAMETERS *params,
                                    const struct pe_image_info *pe_info, DWORD *info_size );
-@@ -233,6 +259,11 @@ extern unsigned int server_queue_process_apc( HANDLE process, const union apc_ca
+@@ -233,6 +259,13 @@ extern unsigned int server_queue_process_apc( HANDLE process, const union apc_ca
  extern int server_get_unix_fd( HANDLE handle, unsigned int wanted_access, int *unix_fd,
                                 int *needs_close, enum server_fd_type *type, unsigned int *options );
  extern int wine_server_receive_fd( obj_handle_t *handle );
 +/* Crossover-IOS fork 0003b/d: per-pseudo-process server connection */
 +extern void set_process_server_fd( PEB *owner, int fd );
 +extern int current_server_fd(void);
++extern NTSTATUS alloc_process_fd_cache( PEB *owner );
++extern void release_process_fd_cache( PEB *owner );
 +extern NTSTATUS server_init_process_inproc( SIZE_T *info_size );
 +extern NTSTATUS server_init_process_done_inproc( BOOL *suspend );
  extern void process_exit_wrapper( int status ) DECLSPEC_NORETURN;
  extern size_t server_init_process(void);
  extern void server_init_process_done(void);
 diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
-index 111849dc..e747471d 100644
+index 111849dc..69bc6d16 100644
 --- a/dlls/ntdll/unix/virtual.c
 +++ b/dlls/ntdll/unix/virtual.c
-@@ -4345,8 +4345,9 @@ NTSTATUS virtual_alloc_thread_stack( INITIAL_TEB *stack, ULONG_PTR limit_low, UL
+@@ -3204,15 +3204,22 @@ static NTSTATUS map_image_into_view( struct file_view *view, const UNICODE_STRIN
+ 
+     /* relocate to dynamic base */
+ 
+-    if (image_info->map_addr && (delta = image_info->map_addr - image_info->base))
++    /* Crossover-IOS fork, patch series 0003i: relocate to the address the
++     * view actually occupies, not to the server-assigned dynamic base.
++     * Upstream the two are always equal: every process has its own address
++     * space, so mapping at map_addr cannot fail. In the shared-address-space
++     * model a sibling pseudo-process may already hold map_addr; the view then
++     * lands elsewhere, and relocating to map_addr would point every absolute
++     * address in this image into the sibling's copy (aliasing its globals). */
++    if (image_info->map_addr && (delta = (ULONG_PTR)ptr - image_info->base))
+     {
+         TRACE_(module)( "relocating %s dynamic base %lx -> %lx mapped at %p\n", debugstr_us(nt_name),
+-                        (ULONG_PTR)image_info->base, (ULONG_PTR)image_info->map_addr, ptr );
++                        (ULONG_PTR)image_info->base, (ULONG_PTR)ptr, ptr );
+ 
+         if (nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC)
+-            ((IMAGE_NT_HEADERS64 *)nt)->OptionalHeader.ImageBase = image_info->map_addr;
++            ((IMAGE_NT_HEADERS64 *)nt)->OptionalHeader.ImageBase = (ULONG_PTR)ptr;
+         else
+-            ((IMAGE_NT_HEADERS32 *)nt)->OptionalHeader.ImageBase = image_info->map_addr;
++            ((IMAGE_NT_HEADERS32 *)nt)->OptionalHeader.ImageBase = (ULONG_PTR)ptr;
+ 
+         if ((dir = get_data_dir( nt, total_size, IMAGE_DIRECTORY_ENTRY_BASERELOC )))
+         {
+@@ -4345,8 +4352,9 @@ NTSTATUS virtual_alloc_thread_stack( INITIAL_TEB *stack, ULONG_PTR limit_low, UL
      sigset_t sigset;
      SIZE_T size;
  

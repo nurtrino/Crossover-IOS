@@ -74,6 +74,7 @@ test-real: $(BUILD)/server/real_client_test $(BUILD)/server/real_multi_test $(BU
 	./embedded_server_test.sh
 	./spawn_seam_test.sh
 	./inproc_run_test.sh
+	./m1_notepad_test.sh
 
 clean:
 	rm -rf $(BUILD)

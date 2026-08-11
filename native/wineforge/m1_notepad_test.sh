@@ -1,44 +1,26 @@
 #!/usr/bin/env bash
-# M1 GATE — currently FAILING. This is the executable definition of what is
-# still missing, not a passing test. It is deliberately NOT wired into
-# `make test-real`; run it by hand to check progress toward M1.
+# M1 GATE — the executable definition of milestone M1, wired into
+# `make test-real` since it passes (patch series 0003i).
 #
-# Current result on the PE-DLL build:
-#   * notepad with the in-process backend on, against a WARM server: runs and
-#     stays up, same as the fork backend (both verified alive).
-#   * against a COLD server, explorer's desktop path spawns notepad as an
-#     in-process CHILD, and that child exits early.
-# So the remaining gap is specifically a GUI child launched through explorer.
-# PE-format DLLs (which fixed hostname.exe and gave each pseudo-process its own
-# kernel32) did NOT fix this one, so the cause is elsewhere. Located:
-#   0068:err:seh:NtRaiseException Unhandled exception code c0000005 (access
-#   violation) at 0x6fffffc445d5 — that is inside ntdll.dll itself
-#   (base 0x6fffffbf0000, offset ~0x545d5).
-# ntdll is deliberately mapped at ONE base for every pseudo-process (the
-# shared-ntdll model this whole port rests on), so unlike kernel32 it cannot be
-# given a private copy. The fault is therefore in shared PE-side ntdll state
-# that a GUI child reaches and a console child does not.
-#
-# LOCATED to an instruction. Disassembling the PE ntdll (preferred ImageBase
-# 0x170000000, so fault RVA 0x545d5 -> 0x1700545d5):
-#     load_dll:
-#     1700545d5:  8b 46 08   mov 0x8(%rsi),%eax
-# a 4-byte read at offset 8 through a bad/NULL pointer, inside load_dll — a
-# function directly touched by patch 0003g (per-pseudo-process loader state).
-# So the prime suspect is our own per-process block rather than anything
-# inherent to sharing ntdll: a field the primary process gets initialised via
-# loader_init's first-time branch which a GUI child reaches before/without
-# initialisation. Candidates in order: the hash_table list heads,
-# cached_modref, node_ntdll/node_kernel32, tls_dirs.
-# Next step is mechanical: build ntdll with symbols, break on load_dll for the
-# child, and see which per-process field is NULL.
-# Good news: the host survives (SEH catches it, rc=5), it is no longer a
-# host-killing SIGSEGV.
-#
-# Note the measurement tension: killing the server between backends is required
-# for the host-process count to mean anything (otherwise the second run
-# inherits the first's services.exe/explorer.exe), but that same cold start is
-# what triggers the failing child path.
+# History of the failure this gate caught (see docs/DESIGN-0003-inproc-spawn.md
+# for the full account): a GUI child spawned through explorer's desktop path
+# died with an access violation inside ntdll's load_dll (the instruction at
+# ntdll RVA 0x545d5 read through a NULL IMAGE_NT_HEADERS pointer in
+# find_existing_module). The chain behind it was:
+#   1. the client-side handle->unix-fd cache was host-global while handle
+#      values are per-process, so a child's section handle could alias a
+#      sibling's cached fd — the child mapped its kernel32 from the wrong
+#      file and got an image with no PE header (the NULL above);
+#   2. map_image_into_view relocated images to the server-assigned dynamic
+#      base even when a sibling pseudo-process already occupied it and the
+#      view had landed elsewhere — mis-relocating every absolute address
+#      into the sibling's copy;
+#   3. win32u's user-session init ran under one host-global pthread_once, so
+#      a second pseudo-process never connected to a winstation/desktop and
+#      the explorer /desktop child failed every CreateWindow with
+#      ERROR_INVALID_HANDLE, respawning forever.
+# All three are fixed by 0003i (per-process fd cache, relocate-to-actual-base,
+# per-process user-session init).
 #
 # M1 — `wine notepad.exe` with Windows child processes as threads, not processes.
 #
@@ -88,9 +70,24 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# how many `wine` host processes are alive (the prefix is unique to this run,
-# and every server is killed between measurements, so a plain count is scoped)
-hosts() { pgrep -c -f "$build/loader/wine" 2>/dev/null || true; }
+# How many wine host processes are alive for THIS prefix. Counted via
+# /proc/PID/exe (the loader binary, possibly through wine-preloader): wine
+# rewrites child argv to the Windows image name ("C:\windows\...\services.exe"),
+# so a cmdline match (pgrep -f) misses every forked child. Scoped to this
+# run's prefix through the process environment.
+hosts() {
+    local n=0 p e
+    for p in /proc/[0-9]*; do
+        e=$(readlink "$p/exe" 2>/dev/null) || continue
+        case "$e" in
+            "$build"/loader/wine|"$build"/loader/wine-preloader) ;;
+            *) continue ;;
+        esac
+        tr '\0' '\n' < "$p/environ" 2>/dev/null | grep -qxF "WINEPREFIX=$prefix" || continue
+        n=$((n+1))
+    done
+    echo "$n"
+}
 
 echo "creating the prefix (fork backend — bootstrap boundary)"
 DISPLAY="$dpy" WINEPREFIX="$prefix" WINEDEBUG=-all timeout 240 "$wine" wineboot.exe >/dev/null 2>&1

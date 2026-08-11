@@ -111,10 +111,39 @@ behavior is byte-for-byte unchanged — every new path is opt-in behind
   load their own imports and run process attach, so DLL-importing programs
   (nested `cmd.exe`, `attrib.exe`) run in-process.
 
+- **Stage h — bootstrap boundary** (`process.c`): `spawn_process` falls back
+  to the fork backend before ntdll's PE side publishes its entry points and
+  during prefix bootstrap, so cold-prefix creation works with the in-process
+  flags on. iOS must ship a prepared prefix (stated architectural
+  requirement).
+- **Stage i — per-process fd cache + relocate-to-actual-base** (`server.c`,
+  `process.c`, `virtual.c`, `unix_private.h`): the client-side handle→unix-fd
+  cache becomes per-pseudo-process (handle values are per-process, so a
+  shared cache aliases siblings' handles — this was the M1 GUI-child access
+  violation: a child mapped kernel32 through a stale sibling fd and got an
+  image with no PE header). And `map_image_into_view` now relocates an image
+  to the address its view actually landed at, not the server-assigned dynamic
+  base a sibling pseudo-process may already occupy.
+
 Validated by `native/wineforge/spawn_seam_test.sh` (both dispatch directions,
 server-side handshake counts, per-child image mapping) and
 `inproc_run_test.sh` (children execute and exit with real codes, proved from
 the server's own trace), with the whole wineforge suite staying green.
+
+### 0004-inproc-user-session.patch
+
+The win32u side of the in-process model (one file: `dlls/win32u/class.c`).
+win32u.so is dlopen'ed once per host process, but its user-session init ran
+under a single host-global `pthread_once`: with several pseudo-processes in
+one host, only the first ever connected to a winstation/desktop, snapshot its
+startup info, or registered the (per-process, server-side) builtin window
+classes. The explorer `/desktop` child then failed every window creation with
+`ERROR_INVALID_HANDLE` and win32u's desktop-start path respawned explorer
+forever — the last M1 blocker. `init_user` is split: session-wide pieces
+(shared session mapping, GDI shared handle table, sysparams) stay host-wide,
+per-process pieces (`init_startup_info`, `winstation_init`,
+`register_desktop_class`) run once per pseudo-process, keyed on the PEB.
+Validated by `m1_notepad_test.sh` (the M1 gate).
 
 ### Regenerating a patch — read this first
 

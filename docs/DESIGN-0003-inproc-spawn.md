@@ -458,3 +458,81 @@ and a second `init_first_thread` on a shared server. There is no small
 green-testable slice of *those* — 0003a/b scaffold cleanly, but the loader is
 indivisible. This is the multi-week centerpiece the whole port has been
 walking toward, and the reason a native iOS Wine did not already exist.
+
+## Status: 0003i landed (2026-08-11) — the M1 gate passes
+
+Two updates supersede sections above:
+
+**DLL-global aliasing ("the open risk, measured") is fixed** — not by this
+stage but by rebuilding with mingw (never `--without-mingw`): DLLs are real PE
+files, each pseudo-process maps its own copy-on-write view, and
+`inproc_run_test.sh` prints `N processes, N distinct kernel32 mappings —
+isolated`. That also fixed `hostname.exe`'s ERROR_INVALID_HANDLE.
+
+**The remaining M1 blocker — a GUI child spawned through explorer's desktop
+path dying with an access violation in `load_dll` — is fixed.** The
+disassembly hint in the handoff (a 4-byte read at offset 8 through NULL,
+inside `load_dll`) resolved via DWARF line info to `find_existing_module`'s
+`nt->FileHeader.TimeDateStamp` with `nt == NULL`: the freshly mapped module
+had no PE header. Three distinct shared-state bugs stacked up behind it:
+
+1. **The client handle→unix-fd cache was host-global** (`unix/server.c`
+   `fd_cache`, keyed by handle value). Handle values are per-process on the
+   server, so a child's section handle aliased whatever fd a sibling had
+   cached under the same number — the child mapped its kernel32 from the
+   wrong file and read an all-zeros header (which `map_image_into_view`
+   happily maps: it never checks the MZ magic, and a zero header means zero
+   sections and success). Fixed: the fd cache is per-pseudo-process, keyed on
+   the PEB like the server socket; the primary keeps the static instance.
+   Registered in `spawn_process_inproc`, released on the failed-spawn and
+   not-entered detach paths.
+2. **Images were relocated to the server-assigned dynamic base even when the
+   view landed elsewhere** (`unix/virtual.c` `map_image_into_view`). Upstream
+   the two always match — each process has its own address space, so mapping
+   at `map_addr` cannot fail. In the shared address space the parent already
+   occupies `map_addr`, the child's view falls back to another range, and
+   relocating to `map_addr` pointed every absolute address into the parent's
+   copy — silently re-aliasing the DLL globals that PE mapping had just
+   isolated. Fixed: relocate to the address the view actually occupies. The
+   server's `map_image_view` tolerates this (`STATUS_IMAGE_NOT_AT_BASE` is a
+   success status).
+3. **win32u's user-session init ran once per host, not once per process**
+   (`win32u/class.c` `init_user` under a single `pthread_once`; patch 0004
+   since win32u is outside the 0003 ntdll scope). A second pseudo-process
+   never ran `winstation_init()`, so the explorer `/desktop` child had no
+   thread desktop, every `CreateWindow` failed with ERROR_INVALID_HANDLE
+   (server-side `get_thread_desktop` on an empty handle), and win32u's
+   desktop-start path respawned explorer forever. Fixed: `init_user` split
+   into session-wide parts (shared session mapping, GDI shared handle table,
+   sysparams — one session per host, correct to share) and per-pseudo-process
+   parts (`init_startup_info`, `winstation_init`, `register_desktop_class` —
+   window classes are per-process on the server), the latter gated on the
+   PEB.
+
+With all three in place, a cold-server `wine notepad.exe` under
+`WINE_INPROC_SPAWN=1 WINE_INPROC_RUN=1` runs start.exe as the primary with
+notepad and one explorer `/desktop` as in-process children, and notepad stays
+up — same observable behaviour as the fork backend, in one host process.
+`m1_notepad_test.sh` passes and is wired into `make test-real`. (The gate's
+host-process count also had to be fixed: wine rewrites child argv to the
+Windows image name, so the old `pgrep -f <loader path>` could never see forked
+children — the count now uses `/proc/PID/exe`, scoped to the test prefix via
+the process environment.)
+
+### Still open after M1 (tracked, not blockers)
+
+- **Fault containment**: a crashing child can still take the host down; the
+  backend stays opt-in.
+- **Pseudo-process exit does not reclaim per-process registrations.** The
+  PEB-keyed registries (server fd, image info, fd cache, win32u init gate)
+  are released only on the failed-spawn/not-entered paths; a child that
+  enters its PE and exits leaks its slot and its cached fds, like the
+  deliberately-leaked TEB. The registries hold 64 slots, so long-running
+  hosts with heavy process churn will exhaust them — proper unwind at
+  pseudo-process exit is part of the fault-containment work.
+- **Known shared PE-side globals that still alias** (audit list for the next
+  correctness pass): `pBaseThreadInitThunk` / `pCtrlRoutine` in ntdll's PE
+  loader are overwritten by each process's kernel32 load;
+  `process_actctx` in `actctx.c` is one pointer for all pseudo-processes;
+  win32u's `startup_show_window` / `startup_info_flags` are snapshotted per
+  process into shared variables (last writer wins).
