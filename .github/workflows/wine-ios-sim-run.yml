@@ -102,6 +102,21 @@ jobs:
           BUILD="$PWD/sim-build"
           WP="$PWD/simprefix"
           mkdir -p "$WP"
+          # -- diagnostics: the previous run died with SIGKILL at exec, which on
+          # Apple platforms means AMFI (signature) or bad load commands. Pin it.
+          echo "=== loader/wine header + PAGEZERO + platform ==="
+          otool -hv "$BUILD/loader/wine" | head -5 || true
+          otool -l "$BUILD/loader/wine" | grep -B1 -A5 "__PAGEZERO" | head -12 || true
+          otool -l "$BUILD/loader/wine" | grep -A4 "LC_BUILD_VERSION\|LC_VERSION_MIN" | head -12 || true
+          codesign -dv "$BUILD/loader/wine" 2>&1 | head -6 || true
+          echo "=== spawn sanity check: plain hello binary ==="
+          SIMSDK=$(xcrun --sdk iphonesimulator --show-sdk-path)
+          printf '#include <stdio.h>\nint main(void){ printf("HELLO_FROM_SIM\\n"); return 0; }\n' > hello.c
+          xcrun clang -arch arm64 -isysroot "$SIMSDK" -mios-simulator-version-min=16.0 -o hello hello.c
+          xcrun simctl spawn "$UDID" "$PWD/hello" || echo "hello spawn FAILED rc=$?"
+          echo "=== ad-hoc re-sign the wine binaries (belt and braces) ==="
+          codesign -f -s - "$BUILD/loader/wine" "$BUILD/server/wineserver" 2>&1 | head -4 || true
+          find "$BUILD/dlls" "$BUILD/programs" -name "*.so" -exec codesign -f -s - {} \; 2>/dev/null || true
           echo "=== creating the prefix (wineboot) ==="
           xcrun simctl spawn "$UDID" /usr/bin/env WINEPREFIX="$WP" WINEDEBUG=+err \
             "$BUILD/loader/wine" wineboot.exe --init >boot.log 2>&1 || true
@@ -111,6 +126,10 @@ jobs:
             "$BUILD/loader/wine" cmd.exe /c "echo WINDOWS_RAN_IN_IOS_SIM_%PROCESSOR_ARCHITECTURE%" \
             >run.log 2>&1 || true
           echo "--- run.log ---"; cat run.log || true
+          echo "=== kernel/AMFI messages from the unified log (why SIGKILL) ==="
+          log show --last 4m --style compact \
+            --predicate 'eventMessage CONTAINS[c] "wine" OR process == "amfid" OR eventMessage CONTAINS[c] "CODE SIGNING" OR eventMessage CONTAINS[c] "pagezero"' \
+            2>/dev/null | tail -50 || true
           if grep -q "WINDOWS_RAN_IN_IOS_SIM" run.log; then
             echo "::notice::A Windows console program EXECUTED inside the iOS Simulator"
             echo "ran=yes" >> "$GITHUB_OUTPUT"
