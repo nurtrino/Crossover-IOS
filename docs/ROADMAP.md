@@ -152,18 +152,27 @@ Groundwork done on Linux (see `native/ios/README.md` for the full map):
       tests on a simulator, packages the IPA, and publishes a GitHub release
       with a direct download link.
 Cross-build now proven in CI (`.github/workflows/wine-ios-probe.yml`):
-- [x] **Wine unix core cross-compiles for iOS arm64** — `dlls/ntdll/ntdll.so`
-      and `wineserver` build against the iPhoneOS SDK with the full patch
-      series applied and `WINE_FORKLESS` defined, verified as arm64 Mach-O on
-      a GitHub macOS runner. The iOS source port is patch 0006 (six files:
-      cdrom/file/loader/system/virtual, and a new `USE_INPROC_TRACE` server
-      backend), each a macOS→iOS narrowing that leaves the macOS and Linux
-      builds untouched. This retires the "needs a Mac to even try" unknown —
-      the cross toolchain (Xcode clang + iPhoneOS SDK + Homebrew LLVM for PE)
-      is captured in the probe workflow.
+- [x] **The iOS-native Wine runtime links for iOS arm64** — `ntdll.so`,
+      `win32u.so`, and `wineserver` all build and link against the iPhoneOS
+      SDK with the full patch series applied and `WINE_FORKLESS` defined,
+      verified as arm64 Mach-O on a GitHub macOS runner and published as the
+      `wine-ios-runtime-arm64` artifact. The iOS source port is patch 0006:
+      `TargetConditionals`-guarded narrowings in cdrom/file/loader/system/
+      virtual, a `USE_INPROC_TRACE` server backend replacing the Mach
+      debugger, and a `configure.ac` iOS branch that disables the AppKit
+      winemac driver and blanks the macOS-only frameworks (this is what let
+      win32u.so link). The macOS and Linux builds are untouched (Linux
+      `ntdll.so`/`wineserver` re-verified byte-clean). This retires the
+      "needs a Mac to even try" unknown: the cross toolchain (Xcode clang +
+      iPhoneOS SDK + Homebrew LLVM for PE + autoconf) is captured in the probe.
+      What this is NOT: a windowed runtime. winemac is disabled and there is
+      no Metal/UIKit display driver yet, so this links the headless unix side
+      only — a GUI app cannot present on-device until that driver exists.
 Remaining for M2 (a device or richer host harness):
+- [ ] A UIKit/Metal `win32u` display backend (replaces the disabled winemac
+      driver) — the piece that actually puts a window on screen
 - [ ] Cross-build the PE side for arm64-windows (llvm-mingw) + link a loadable
-      dylib and bundle it in the app
+      dylib and bundle it, the PE DLLs, and the prepared prefix into the app
 - [ ] 16 KB-page mmap/section-mapping verification on-device; TEB register plumbing
 - [ ] Dev-channel harness (TrollStore/jailbreak) for on-device iteration
 - [ ] Render Wine's display into a `CAMetalLayer` via a UIKit winedrv stub
