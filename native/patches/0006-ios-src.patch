@@ -22,3 +22,58 @@ index 08365087..fdd32e25 100644
  #ifdef __APPLE__
  # include <libkern/OSByteOrder.h>
  # include <sys/disk.h>
+diff --git a/dlls/ntdll/unix/file.c b/dlls/ntdll/unix/file.c
+index 42c82531..7ab82dcf 100644
+--- a/dlls/ntdll/unix/file.c
++++ b/dlls/ntdll/unix/file.c
+@@ -119,6 +119,27 @@
+ #define WINE_MOUNTMGR_EXTENSIONS
+ #include "ddk/mountmgr.h"
+ #include "wine/server.h"
++
++/* Crossover-IOS fork, patch 0006: the iOS SDK ships neither <sys/vnode.h>
++ * nor <sys/conf.h>. getattrlist() and FIODTYPE themselves exist on iOS; only
++ * the constants are missing, and they are stable xnu ABI values. */
++#if defined(__APPLE__)
++# include <TargetConditionals.h>
++# if !TARGET_OS_OSX
++#  ifndef VLNK
++#   define VLNK 5      /* enum vtype, xnu bsd/sys/vnode.h */
++#  endif
++#  ifndef D_TAPE
++#   define D_TAPE 1    /* xnu bsd/sys/conf.h */
++#  endif
++#  ifndef D_DISK
++#   define D_DISK 2
++#  endif
++#  ifndef D_TTY
++#   define D_TTY 3
++#  endif
++# endif
++#endif
+ #include "wine/list.h"
+ #include "wine/debug.h"
+ #include "unix_private.h"
+diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
+index 166fdf3b..c3fd5257 100644
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -2173,6 +2173,10 @@ static void apple_main_thread(void)
+ 
+     if (!pthread_main_np()) return;
+ 
++/* Crossover-IOS fork, patch 0006: Carbon Multiprocessing Services and the
++ * distributed notification center are macOS-only; iOS has neither, and the
++ * run loop below works without these warmups. */
++#if !defined(TARGET_OS_IPHONE) || !TARGET_OS_IPHONE
+ #pragma clang diagnostic push
+ #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+     /* Multi-processing Services can get confused about the main thread if the
+@@ -2185,6 +2189,7 @@ static void apple_main_thread(void)
+      * center scheduled on this thread's run loop.  In theory, it's scheduled
+      * in the first thread to ask for it. */
+     CFNotificationCenterGetDistributedCenter();
++#endif
+ 
+     /* We use this run loop source for two purposes.  First, a run loop exits
+      * if it has no more sources scheduled.  So, we need at least one source
