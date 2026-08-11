@@ -1,5 +1,5 @@
 diff --git a/configure.ac b/configure.ac
-index b8ae3db6..354cbe6d 100644
+index b8ae3db6..c67eaea6 100644
 --- a/configure.ac
 +++ b/configure.ac
 @@ -925,6 +925,34 @@ case $host_os in
@@ -37,7 +37,7 @@ index b8ae3db6..354cbe6d 100644
      enable_winemac_drv=${enable_winemac_drv:-yes}
      dnl declare needed frameworks
      AC_SUBST(CORETEXT_LIBS,"-framework CoreText")
-@@ -936,8 +964,18 @@ case $host_os in
+@@ -936,8 +964,20 @@ case $host_os in
      AC_SUBST(APPKIT_LIBS,"-framework AppKit")
      AC_SUBST(SECURITY_LIBS,"-framework Security -framework CoreFoundation")
      AC_SUBST(SYSTEMCONFIGURATION_LIBS,"-framework SystemConfiguration")
@@ -46,12 +46,14 @@ index b8ae3db6..354cbe6d 100644
      WINELOADER_LDFLAGS="-Wl,-segalign,0x1000,-pagezero_size,0x1000,-sectcreate,__TEXT,__info_plist,loader/wine_info.plist"
 +    if test "x$wine_cv_target_ios" = xyes
 +    then
-+        dnl The arm64 kernel requires a >= 4GB __PAGEZERO and 16KB-aligned
-+        dnl segments in a main executable; the 4KB overrides above produce a
-+        dnl binary that is killed at exec (SIGKILL, verified in the iOS
-+        dnl Simulator). Use the default layout — the 64-bit guest does not
-+        dnl need addresses below 4GB.
-+        WINELOADER_LDFLAGS="-Wl,-sectcreate,__TEXT,__info_plist,loader/wine_info.plist"
++        dnl arm64 rejects the 4KB segalign/pagezero overrides above (the
++        dnl kernel kills the binary at exec — verified in the iOS Simulator),
++        dnl but a full 4GB __PAGEZERO covers 0x7ffe0000, where Windows
++        dnl hardcodes the KUSER_SHARED_DATA page, and ntdll then fails with
++        dnl "failed to map the shared user data" (also verified). End the
++        dnl page zero exactly at 0x7ffe0000 (16KB-aligned) so that page and
++        dnl the rest of the low-4GB tail stay mappable.
++        WINELOADER_LDFLAGS="-Wl,-pagezero_size,0x7ffe0000,-sectcreate,__TEXT,__info_plist,loader/wine_info.plist"
 +    fi
  
      case $HOST_ARCH in
