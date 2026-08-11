@@ -536,3 +536,26 @@ the process environment.)
   `process_actctx` in `actctx.c` is one pointer for all pseudo-processes;
   win32u's `startup_show_window` / `startup_info_flags` are snapshotted per
   process into shared variables (last writer wins).
+
+## Status: 0005 landed (2026-08-11) — fork/exec compiled out (`WINE_FORKLESS`)
+
+Patch 0005 removes the entire runtime fork/exec surface at compile time:
+`spawn_process_fork`, `exec_wineloader`, `__wine_unix_spawnvp`,
+`fork_and_exec`, `start_server`'s server spawn, and the server's daemonize
+path all sit behind `#ifdef WINE_FORKLESS`. In that mode the in-process
+backend is the only backend — no `WINE_INPROC_SPAWN`/`WINE_INPROC_RUN`
+opt-in — and the model's two preconditions become hard requirements (a live
+ntdll PE side; a prepared prefix, `native/ios/make-prefix-bundle.sh`). The
+first process's early wineboot spawn is refused cleanly (`run_wineboot`
+handles the failure without hanging); session services are deferred to the
+in-process-wineboot work.
+
+Proven on Linux (`native/wineforge/forkless_gate.sh`): notepad on a warm
+bundle prefix, server started externally in foreground (on iOS it is a
+thread in the app), stays up with start.exe, notepad and explorer running as
+thread groups in ONE host process — while the binary contains no fork path
+at all (`spawn_process_fork` is dead code, confirmed by the compiler).
+Default builds are unchanged.
+
+This closes M1's "all fork/exec compiled out" language and defines the exact
+compile mode an iOS build uses.

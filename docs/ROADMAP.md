@@ -139,6 +139,14 @@ Groundwork done on Linux (see `native/ios/README.md` for the full map):
 - [x] **16 KB-page audit of the fork patches** + `host_page_round()`: the
       spawn path's allocations were 4K-page rounded and would assert on
       Apple's 16 KB-page hosts; fixed, Linux behaviour unchanged.
+- [x] **`WINE_FORKLESS` build mode (patch 0005): all fork/exec compiled
+      out.** Six guard sites remove the entire runtime fork/exec surface;
+      in-process becomes the only backend and the prepared prefix a hard
+      requirement. Proven on Linux (`native/wineforge/forkless_gate.sh`):
+      notepad runs on a warm bundle prefix against an externally-started
+      server — start.exe, notepad and explorer as thread groups in ONE host
+      process, with fork not present in the binary. This is the compile mode
+      and runtime shape of the iOS build.
 - [x] **Unsigned IPA pipeline** (`.github/workflows/build-ipa.yml`): macOS
       runner builds CrossoverPad unsigned (arm64, iOS 17+), runs the unit
       tests on a simulator, packages the IPA, and publishes a GitHub release
