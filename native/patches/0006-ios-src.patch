@@ -109,6 +109,76 @@ index 8c81d679..8ad756e9 100644
  #ifdef __APPLE__
  #include <DiskArbitration/DiskArbitration.h>
  #include <SystemConfiguration/SCDynamicStoreCopyDHCPInfo.h>
+diff --git a/dlls/nsiproxy.sys/ip.c b/dlls/nsiproxy.sys/ip.c
+index 002d2b48..5d4b94ab 100644
+--- a/dlls/nsiproxy.sys/ip.c
++++ b/dlls/nsiproxy.sys/ip.c
+@@ -1313,7 +1313,7 @@ static NTSTATUS ipv4_neighbour_enumerate_all( void *key_data, UINT key_size, voi
+         }
+         fclose( fp );
+     }
+-#elif defined(HAVE_SYS_SYSCTL_H)
++#elif defined(HAVE_SYS_SYSCTL_H) && defined(RTF_LLINFO) /* iOS hides RTF_LLINFO and struct rt_msghdr */
+     {
+         int mib[] = { CTL_NET, PF_ROUTE, 0, AF_INET, NET_RT_FLAGS, RTF_LLINFO }, sinarp_len;
+         size_t needed;
+@@ -1578,7 +1578,7 @@ static NTSTATUS ipv4_forward_enumerate_all( void *key_data, UINT key_size, void
+         }
+         fclose( fp );
+     }
+-#elif defined(HAVE_SYS_SYSCTL_H) && defined(NET_RT_DUMP)
++#elif defined(HAVE_SYS_SYSCTL_H) && defined(NET_RT_DUMP) && defined(RTF_GATEWAY) /* iOS hides RTF_* and struct rt_msghdr */
+     {
+         int mib[6] = { CTL_NET, PF_ROUTE, 0, PF_INET, NET_RT_DUMP, 0 };
+         size_t needed;
+diff --git a/dlls/nsiproxy.sys/ndis.c b/dlls/nsiproxy.sys/ndis.c
+index c7d1f73f..1f9e2adf 100644
+--- a/dlls/nsiproxy.sys/ndis.c
++++ b/dlls/nsiproxy.sys/ndis.c
+@@ -66,6 +66,22 @@
+ #include <linux/wireless.h>
+ #endif
+ 
++/* Crossover-IOS fork, patch 0006: iOS's <net/route.h> hides the routing-
++ * message constants behind PRIVATE, but the sysctl(NET_RT_IFLIST) interface
++ * enumeration this file uses is public there and the values are stable Darwin
++ * ABI (xnu bsd/net/route.h). Provide the two this file needs. */
++#if defined(__APPLE__)
++# include <TargetConditionals.h>
++# if !TARGET_OS_OSX
++#  ifndef RTM_IFINFO
++#   define RTM_IFINFO 0xe
++#  endif
++#  ifndef RTA_IFP
++#   define RTA_IFP 0x10
++#  endif
++# endif
++#endif
++
+ #include <pthread.h>
+ 
+ #include "ntstatus.h"
+diff --git a/dlls/nsiproxy.sys/nsi.c b/dlls/nsiproxy.sys/nsi.c
+index a13d77a4..296720c2 100644
+--- a/dlls/nsiproxy.sys/nsi.c
++++ b/dlls/nsiproxy.sys/nsi.c
+@@ -31,6 +31,16 @@
+ #ifdef HAVE_LINUX_RTNETLINK_H
+ #include <linux/rtnetlink.h>
+ #endif
++/* Crossover-IOS fork, patch 0006: the network-change notification backend
++ * below uses kernel events (<sys/kern_event.h>), which the iOS SDK does not
++ * ship; un-define __APPLE__ on non-macOS Apple targets so the generic
++ * no-notification fallback is compiled. */
++#ifdef __APPLE__
++# include <TargetConditionals.h>
++# if !TARGET_OS_OSX
++#  undef __APPLE__
++# endif
++#endif
+ #ifdef __APPLE__
+ #include <sys/ioctl.h>
+ #include <sys/kern_event.h>
 diff --git a/dlls/ntdll/unix/cdrom.c b/dlls/ntdll/unix/cdrom.c
 index 08365087..fdd32e25 100644
 --- a/dlls/ntdll/unix/cdrom.c
