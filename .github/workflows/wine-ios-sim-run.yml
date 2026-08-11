@@ -80,6 +80,9 @@ jobs:
           done
           test -f loader/wine && test -f dlls/ntdll/ntdll.so || { echo "::error::core build incomplete"; tail -80 build.log; exit 1; }
           file loader/wine | grep -q arm64 || exit 1
+          echo "=== PE layout (which arch dirs did the build produce?) ==="
+          ls programs/wineboot/ programs/cmd/ dlls/ntdll/ 2>/dev/null | head -20
+          ls programs/cmd/*-windows/cmd.exe programs/wineboot/*-windows/wineboot.exe 2>/dev/null || echo "no PE exes found"
 
       - name: Boot an iOS Simulator
         id: sim
@@ -133,15 +136,24 @@ jobs:
           # linker-signed flag from the ad-hoc signature, and AMFI then rejects
           # them (-423, verified). The as-built linker signature is the one
           # the simulator accepts — same class as the hello binary above.
-          echo "=== creating the prefix (wineboot) ==="
-          xcrun simctl spawn "$UDID" /usr/bin/env WINEPREFIX="$WP" WINEDEBUG=+err \
+          echo "=== creating the prefix (wineboot, +module diagnostics) ==="
+          xcrun simctl spawn "$UDID" /usr/bin/env WINEPREFIX="$WP" WINEDEBUG=+err,+module \
             "$BUILD/loader/wine" wineboot.exe --init >boot.log 2>&1 || true
-          tail -25 boot.log || true
-          echo "=== running: cmd.exe /c echo ==="
+          tail -60 boot.log || true
+          echo "=== running: cmd.exe /c echo (by name) ==="
           xcrun simctl spawn "$UDID" /usr/bin/env WINEPREFIX="$WP" WINEDEBUG=+err \
             "$BUILD/loader/wine" cmd.exe /c "echo WINDOWS_RAN_IN_IOS_SIM_%PROCESSOR_ARCHITECTURE%" \
             >run.log 2>&1 || true
-          echo "--- run.log ---"; cat run.log || true
+          echo "--- run.log (by name) ---"; cat run.log || true
+          echo "=== running: cmd.exe /c echo (explicit unix path, bypasses system32 search) ==="
+          CMDEXE=$(ls "$BUILD"/programs/cmd/*-windows/cmd.exe 2>/dev/null | head -1)
+          echo "cmd.exe at: ${CMDEXE:-NOT FOUND}"
+          if [ -n "$CMDEXE" ]; then
+            xcrun simctl spawn "$UDID" /usr/bin/env WINEPREFIX="$WP" WINEDEBUG=+err \
+              "$BUILD/loader/wine" "$CMDEXE" /c "echo WINDOWS_RAN_IN_IOS_SIM_%PROCESSOR_ARCHITECTURE%" \
+              >>run.log 2>&1 || true
+          fi
+          echo "--- run.log (both attempts) ---"; cat run.log || true
           echo "=== kernel/AMFI messages from the unified log (why SIGKILL) ==="
           log show --last 4m --style compact \
             --predicate 'eventMessage CONTAINS[c] "wine" OR process == "amfid" OR eventMessage CONTAINS[c] "CODE SIGNING" OR eventMessage CONTAINS[c] "pagezero"' \
