@@ -25,16 +25,20 @@ jobs:
       - name: Apply fork patch series
         run: cd native/patches && ./apply.sh
 
-      - name: Install build deps (bison >= 3)
+      - name: Install build deps (bison >= 3, LLVM PE toolchain)
         run: |
-          brew install bison
+          # aarch64 Wine requires PE cross-compilation (llvm-dlltool + lld-link);
+          # Homebrew LLVM provides both — this is also how the arm64-windows PE
+          # DLLs get built, no llvm-mingw needed.
+          brew install bison llvm lld
           echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
 
       - name: Build native Wine tools (for cross build)
         run: |
           mkdir native-tools && cd native-tools
           ../native/wine/configure --enable-win64 --without-x --without-freetype \
-            --without-mingw --disable-tests >configure-native.log 2>&1 \
+            --disable-tests >configure-native.log 2>&1 \
             || { tail -30 configure-native.log; exit 1; }
           make -j3 __tooldeps__ >tools.log 2>&1 || { tail -40 tools.log; exit 1; }
           echo "native tools built"
@@ -49,7 +53,7 @@ jobs:
           ../native/wine/configure \
             --host=aarch64-apple-darwin \
             --with-wine-tools=../native-tools \
-            --without-x --without-freetype --without-mingw --disable-tests \
+            --without-x --without-freetype --disable-tests \
             CC="$(xcrun -f clang) -arch arm64 -isysroot $SDK -miphoneos-version-min=16.0 -DWINE_FORKLESS" \
             CXX="$(xcrun -f clang++) -arch arm64 -isysroot $SDK -miphoneos-version-min=16.0" \
             > configure-ios.log 2>&1
