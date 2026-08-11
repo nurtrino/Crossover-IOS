@@ -213,3 +213,110 @@ index 69bc6d16..dc10e72f 100644
  #endif
  
  #if defined(HAVE_LINUX_USERFAULTFD_H) && defined(HAVE_LINUX_FS_H)
+diff --git a/server/mach.c b/server/mach.c
+index 0f75d892..946bb54a 100644
+--- a/server/mach.c
++++ b/server/mach.c
+@@ -26,6 +26,7 @@
+ #include <stdio.h>
+ #include <signal.h>
+ #include <stdarg.h>
++#include <string.h>
+ #include <sys/types.h>
+ #include <unistd.h>
+ #ifdef HAVE_SYS_SYSCTL_H
+@@ -547,3 +548,70 @@ out:
+ }
+ 
+ #endif  /* USE_MACH */
++
++#ifdef USE_INPROC_TRACE
++
++/*
++ * Crossover-IOS fork, patch 0006: in-process tracing backend for iOS.
++ *
++ * All pseudo-processes live in the server's own task and address space
++ * (patches 0003/0005), so "another process's" memory is simply our memory:
++ * read/write are direct copies. The ptrace/Mach suspend-and-inspect plumbing
++ * that a cross-process debugger needs is not applicable here and is stubbed;
++ * server-side debugging of an in-process child is future work (it would read
++ * the child thread's TEB-saved context directly rather than via the kernel).
++ */
++
++void sigchld_callback(void)
++{
++}
++
++void init_tracing_mechanism(void)
++{
++}
++
++void init_process_tracing( struct process *process )
++{
++}
++
++void finish_process_tracing( struct process *process )
++{
++}
++
++void init_thread_context( struct thread *thread )
++{
++}
++
++void get_thread_context( struct thread *thread, struct context_data *context, unsigned int flags )
++{
++    /* not supported in-process yet: leave the caller's context unchanged */
++}
++
++void set_thread_context( struct thread *thread, const struct context_data *context, unsigned int flags )
++{
++}
++
++int send_thread_signal( struct thread *thread, int sig )
++{
++    /* in-process threads are not signalled individually here */
++    return 0;
++}
++
++int read_process_memory( struct process *process, client_ptr_t ptr, data_size_t size, char *dest )
++{
++    /* shared address space: the client pointer is valid in our own space */
++    if ((client_ptr_t)(uintptr_t)ptr != ptr) return 0;
++    memcpy( dest, (const void *)(uintptr_t)ptr, size );
++    return 1;
++}
++
++int write_process_memory( struct process *process, client_ptr_t ptr, data_size_t size,
++                          const char *src, data_size_t *written )
++{
++    if ((client_ptr_t)(uintptr_t)ptr != ptr) return 0;
++    memcpy( (void *)(uintptr_t)ptr, src, size );
++    if (written) *written = size;
++    return 1;
++}
++
++#endif  /* USE_INPROC_TRACE */
+diff --git a/server/process.h b/server/process.h
+index 7cfcc39c..fc809723 100644
+--- a/server/process.h
++++ b/server/process.h
+@@ -126,7 +126,18 @@ extern struct thread *console_get_renderer( struct console *console );
+ 
+ /* process tracing mechanism to use */
+ #ifdef __APPLE__
+-#define USE_MACH
++# include <TargetConditionals.h>
++# if TARGET_OS_OSX
++#  define USE_MACH
++# else
++/* Crossover-IOS fork, patch 0006: iOS has no Mach debugger API (mach_vm.h is
++ * unsupported, task_for_pid needs entitlements) and no ptrace worth the
++ * name. In the forkless in-process model every pseudo-process is a thread
++ * group in the server's own task and address space, so cross-process memory
++ * access is a direct copy and the ptrace-style suspend/context plumbing is
++ * not used. */
++#  define USE_INPROC_TRACE
++# endif
+ #elif defined(__sun)
+ #define USE_PROCFS
+ #else
