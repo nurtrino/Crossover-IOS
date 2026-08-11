@@ -21,6 +21,16 @@ milestone view and `native/patches/README.md` for the patch series.
 | 16 KB host-page safety in the fork patches | `host_page_round()`, audit | patch 0003i |
 | **iOS-native runtime links as arm64 Mach-O** | `ntdll.so` + `win32u.so` + `wineserver`, CI-verified | `.github/workflows/wine-ios-probe.yml` |
 | Unsigned IPA (app shell) | released v0.1.0-alpha.1, direct link | `.github/workflows/build-ipa.yml` |
+| **Runtime-bearing IPA** (embeds the real runtime) | released `rt-alpha-1` (~442 MB); build gate verifies the embed | `.github/workflows/build-ipa-runtime.yml` |
+
+The runtime-bearing IPA is the artifact for on-device testing: it embeds
+`WineRuntime/lib/` (the arm64 `ntdll.so`/`win32u.so`/`wineserver`),
+`WineRuntime/pe/` (602 Windows PE DLLs), and `WineRuntime/prefix/` (the
+prepared prefix). The macOS build job fails unless all of those are present in
+the built `.app`, so the release is proof-of-embed, not just proof-of-build.
+The app probes what is embedded (`WineRuntimeBundle`) and `NativeWineEngine`
+reports a specific reason rather than pretending to run — the two things it
+still needs are §2a (display driver) and on-device JIT (§2c).
 
 The cross-build is reproducible: the probe workflow captures the entire
 toolchain (Xcode clang + iPhoneOS SDK, Homebrew `llvm`+`lld` for PE

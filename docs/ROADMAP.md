@@ -168,11 +168,19 @@ Cross-build now proven in CI (`.github/workflows/wine-ios-probe.yml`):
       What this is NOT: a windowed runtime. winemac is disabled and there is
       no Metal/UIKit display driver yet, so this links the headless unix side
       only — a GUI app cannot present on-device until that driver exists.
-Remaining for M2 (a device or richer host harness):
+- [x] **Runtime-bearing IPA assembled and released** (`rt-alpha-1`, ~442 MB,
+      `.github/workflows/build-ipa-runtime.yml`): a two-stage pipeline (Linux
+      builds the PE DLLs + prepared prefix; macOS cross-builds the iOS arm64
+      libs and assembles everything) produces an unsigned IPA that actually
+      **embeds** the runtime — `WineRuntime/{lib,pe,prefix}` — with the build
+      gated on the embed being present and arm64. This is the artifact your
+      on-device testing runs against; the app reports the runtime tier
+      truthfully instead of faking execution.
+Remaining for M2 (needs a device / the display driver):
 - [ ] A UIKit/Metal `win32u` display backend (replaces the disabled winemac
-      driver) — the piece that actually puts a window on screen
-- [ ] Cross-build the PE side for arm64-windows (llvm-mingw) + link a loadable
-      dylib and bundle it, the PE DLLs, and the prepared prefix into the app
+      driver) — the piece that actually puts a window on screen for GUI guests
+- [ ] On-device bring-up against `rt-alpha-1`: JIT/W^X probe, loader
+      integration, 16 KB-page + TEB verification (needs real hardware)
 - [ ] 16 KB-page mmap/section-mapping verification on-device; TEB register plumbing
 - [ ] Dev-channel harness (TrollStore/jailbreak) for on-device iteration
 - [ ] Render Wine's display into a `CAMetalLayer` via a UIKit winedrv stub
