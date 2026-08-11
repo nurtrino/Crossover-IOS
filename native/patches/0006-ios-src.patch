@@ -1,0 +1,24 @@
+diff --git a/dlls/ntdll/unix/cdrom.c b/dlls/ntdll/unix/cdrom.c
+index 08365087..fdd32e25 100644
+--- a/dlls/ntdll/unix/cdrom.c
++++ b/dlls/ntdll/unix/cdrom.c
+@@ -75,6 +75,19 @@
+ # include <sys/scsiio.h>
+ #endif
+ 
++/* Crossover-IOS fork, patch 0006: everything __APPLE__ in this file is
++ * macOS-only — sys/disk.h and the IOKit storage headers do not exist in the
++ * iOS SDK, and iOS devices have no optical-drive hardware to drive. On iOS,
++ * drop to the generic no-cdrom code paths by un-defining __APPLE__ for the
++ * remainder of this translation unit (all system headers this file needs
++ * are already included above this point). */
++#ifdef __APPLE__
++# include <TargetConditionals.h>
++# if !TARGET_OS_OSX
++#  undef __APPLE__
++# endif
++#endif
++
+ #ifdef __APPLE__
+ # include <libkern/OSByteOrder.h>
+ # include <sys/disk.h>
