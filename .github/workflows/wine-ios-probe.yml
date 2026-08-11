@@ -67,11 +67,16 @@ jobs:
         continue-on-error: true
         run: |
           cd ios-build
-          make -j3 dlls/ntdll server >build-ios.log 2>&1
+          # real FILE targets — "make dlls/ntdll" is a no-op directory target
+          make -j3 dlls/ntdll/ntdll.so server/wineserver >build-ios.log 2>&1
           rc=$?
           tail -60 build-ios.log
-          file dlls/ntdll/ntdll.so 2>/dev/null || true
-          file server/wineserver 2>/dev/null || true
+          # a passing step REQUIRES both artifacts to exist as arm64 Mach-O —
+          # a silent no-op make cannot pass this
+          test -f dlls/ntdll/ntdll.so && test -f server/wineserver || exit 1
+          file dlls/ntdll/ntdll.so server/wineserver
+          file dlls/ntdll/ntdll.so | grep -q arm64 || exit 1
+          file server/wineserver | grep -q arm64 || exit 1
           exit $rc
 
       - name: Upload probe evidence
