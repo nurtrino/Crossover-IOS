@@ -122,9 +122,30 @@ Every phase ends with something demonstrable.
       globals; "all fork/exec compiled out" awaits the iOS prepared-prefix
       model (bootstrap deliberately falls back to fork)
 
-## Phase 3 — iOS bring-up (WS-C) → M2
+## Phase 3 — iOS bring-up (WS-C) → M2 ← in progress
+Groundwork done on Linux (see `native/ios/README.md` for the full map):
+- [x] **Prepared-prefix bundle pipeline** (`native/ios/make-prefix-bundle.sh`):
+      iOS cannot create a prefix at runtime (no fork), so the app ships one
+      built at build time. The script builds, prunes, packages (sha256
+      manifest) and *verifies the iOS invariant*: a fresh extraction runs a
+      real DLL-importing program with the in-process backend on and never
+      re-enters prefix bootstrap.
+- [x] **Forkless warm-prefix session start**: the bootstrap fork-fallback now
+      tests the real precondition (system DLLs on disk) instead of
+      `is_prefix_bootstrap`, which is set for the whole wineboot session pass
+      on every cold start. With a prepared prefix, services.exe and friends
+      run in-process too — the M1 gate's collapse improved from 5→3 to 5→2
+      host processes.
+- [x] **16 KB-page audit of the fork patches** + `host_page_round()`: the
+      spawn path's allocations were 4K-page rounded and would assert on
+      Apple's 16 KB-page hosts; fixed, Linux behaviour unchanged.
+- [x] **Unsigned IPA pipeline** (`.github/workflows/build-ipa.yml`): macOS
+      runner builds CrossoverPad unsigned (arm64, iOS 17+), runs the unit
+      tests on a simulator, packages the IPA, and publishes a GitHub release
+      with a direct download link.
+Still needs a Mac (the M2 blockers):
 - [ ] Cross-build the fork against the iOS SDK (winelib static libs + dylibs)
-- [ ] 16 KB-page mmap/section-mapping layer; TEB register plumbing
+- [ ] 16 KB-page mmap/section-mapping verification on-device; TEB register plumbing
 - [ ] Dev-channel harness (TrollStore/jailbreak) for on-device iteration
 - [ ] Render Wine's display into a `CAMetalLayer` via a UIKit winedrv stub
 - [ ] **M2: notepad.exe on an iPad**
