@@ -34,11 +34,43 @@ jobs:
           #include <unistd.h>
           #include <signal.h>
           #include <stdint.h>
+          #include <pthread.h>
           #include <sys/ucontext.h>
           #define LIVE    0x1111222233334444ULL
           #define HANDLER 0xAAAABBBBCCCCDDDDULL
           extern void capture_stub(void);
           volatile uint64_t g_x18;
+
+          static uint64_t read_x18(void) {
+              uint64_t v; __asm__ volatile("mov %0, x18" : "=r"(v)); return v;
+          }
+          static void set_x18(uint64_t v) {
+              __asm__ volatile("mov x18, %0" :: "r"(v) : "x18");
+          }
+
+          /* --- does an ordinary syscall clobber x18? --- */
+          static void test_syscall_boundary(void) {
+              set_x18(LIVE);
+              uint64_t before = read_x18();
+              getpid();                        /* libc -> svc -> kernel -> back */
+              uint64_t after_getpid = read_x18();
+              set_x18(LIVE);
+              (void)write(2, "", 0);           /* another syscall */
+              uint64_t after_write = read_x18();
+              set_x18(LIVE);
+              pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER;
+              pthread_mutex_lock(&m); pthread_mutex_unlock(&m);
+              uint64_t after_mutex = read_x18();
+              printf("SYSCALL before=0x%llx getpid=0x%llx write=0x%llx mutex=0x%llx\n",
+                     (unsigned long long)before, (unsigned long long)after_getpid,
+                     (unsigned long long)after_write, (unsigned long long)after_mutex);
+              if (after_getpid == LIVE && after_write == LIVE && after_mutex == LIVE)
+                  printf("RESULT_SYSCALL=x18_survives_syscalls\n");
+              else
+                  printf("RESULT_SYSCALL=x18_CLOBBERED_BY_SYSCALLS\n");
+              fflush(stdout);
+          }
+
           __attribute__((used, noreturn)) void report(void) {
               printf("PROBE x18_at_resume=0x%llx\n", (unsigned long long)g_x18);
               if (g_x18 == HANDLER)   printf("RESULT=sigreturn_honors_sigcontext_x18\n");
@@ -58,9 +90,9 @@ jobs:
               struct sigaction sa; memset(&sa, 0, sizeof sa);
               sa.sa_sigaction = handler; sa.sa_flags = SA_SIGINFO;
               sigaction(SIGUSR1, &sa, NULL);
-              register uint64_t x18v __asm__("x18"); x18v = LIVE;
-              __asm__ volatile("" : "+r"(x18v));
-              printf("PROBE_START live_x18=0x%llx\n", (unsigned long long)LIVE); fflush(stdout);
+              test_syscall_boundary();          /* run FIRST — the decisive test */
+              set_x18(LIVE);
+              printf("PROBE_START live_x18=0x%llx\n", (unsigned long long)read_x18()); fflush(stdout);
               raise(SIGUSR1);
               printf("UNREACHABLE (stub did not run)\n"); return 1;
           }
@@ -77,7 +109,7 @@ jobs:
           echo "=== probe output ==="
           xcrun simctl spawn "$UDID" "$PWD/probe" 2>&1 | tee out.txt || echo "(probe exited non-zero)"
           echo "=== verdict ==="
-          grep "RESULT=" out.txt || echo "no RESULT line — probe crashed (itself informative)"
+          grep "RESULT" out.txt || echo "no RESULT line — probe crashed (itself informative)"
 
   sim-run:
     runs-on: macos-15
