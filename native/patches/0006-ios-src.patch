@@ -155,3 +155,61 @@ index a7d927a4..0775ebe0 100644
  
  static NTSTATUS fill_battery_state( SYSTEM_BATTERY_STATE *bs )
  {
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index 69bc6d16..dc10e72f 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -65,12 +65,52 @@
+ #endif
+ #if defined(__APPLE__)
+ #define host_page_size mac_host_page_size
++# include <TargetConditionals.h>
+ # include <mach/mach_init.h>
+-# include <mach/mach_vm.h>
++# if TARGET_OS_OSX
++#  include <mach/mach_vm.h>
++# endif
+ # include <mach/task.h>
+ # include <mach/thread_state.h>
+ # include <mach/vm_map.h>
+ #undef host_page_size
++# if !TARGET_OS_OSX
++/* Crossover-IOS fork, patch 0006: the iOS SDK hard-errors on
++ * <mach/mach_vm.h>. The legacy vm_* calls in <mach/vm_map.h> perform the
++ * same operations, and on LP64 their types have the same width as the
++ * mach_vm_* ones — provide the three names this file uses as thin
++ * wrappers converting through the narrower types explicitly. */
++static inline kern_return_t mach_vm_map( vm_map_t target, mach_vm_address_t *address,
++        mach_vm_size_t size, mach_vm_offset_t mask, int flags, mem_entry_name_port_t object,
++        memory_object_offset_t offset, boolean_t copy, vm_prot_t cur_protection,
++        vm_prot_t max_protection, vm_inherit_t inheritance )
++{
++    vm_address_t addr = (vm_address_t)*address;
++    kern_return_t kr = vm_map( target, &addr, (vm_size_t)size, (vm_address_t)mask, flags,
++                               object, (vm_offset_t)offset, copy, cur_protection,
++                               max_protection, inheritance );
++    *address = addr;
++    return kr;
++}
++
++static inline kern_return_t mach_vm_deallocate( vm_map_t target, mach_vm_address_t address,
++        mach_vm_size_t size )
++{
++    return vm_deallocate( target, (vm_address_t)address, (vm_size_t)size );
++}
++
++static inline kern_return_t mach_vm_region( vm_map_t target, mach_vm_address_t *address,
++        mach_vm_size_t *size, vm_region_flavor_t flavor, vm_region_info_t info,
++        mach_msg_type_number_t *count, mach_port_t *object_name )
++{
++    vm_address_t addr = (vm_address_t)*address;
++    vm_size_t sz = (vm_size_t)*size;
++    kern_return_t kr = vm_region_64( target, &addr, &sz, flavor, info, count, object_name );
++    *address = addr;
++    *size = sz;
++    return kr;
++}
++# endif
+ #endif
+ 
+ #if defined(HAVE_LINUX_USERFAULTFD_H) && defined(HAVE_LINUX_FS_H)
