@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      Entitlements the on-device testing channel applies at sideload/sign time.
+      The CI build is unsigned (CODE_SIGNING_ALLOWED=NO), so these are inert in
+      the shipped IPA; a JIT-capable channel (e.g. StikDebug, which attaches a
+      debugger) applies them when installing. They correspond directly to the
+      device-side needs in docs/HANDOFF-M2.md.
+    -->
+
+    <!-- JIT / W^X for the PE loader (dynamic-codesigning). A debugger-assisted
+         channel additionally sets CS_DEBUGGED at runtime; EngineCapabilities
+         .jitAvailable() probes for that. -->
+    <key>dynamic-codesigning</key>
+    <true/>
+
+    <!-- Debugger attach (StikDebug / lldb). Also the tool needed to finish the
+         x18/TEB bring-up on-device (HANDOFF-M2 §2.0). -->
+    <key>get-task-allow</key>
+    <true/>
+
+    <!-- Raise the jetsam memory limit — Wine's address-space reservations and
+         guest heaps are memory-hungry (the "GetMoreMemory" capability). -->
+    <key>com.apple.developer.kernel.increased-memory-limit</key>
+    <true/>
+
+    <!-- Extend the usable virtual-address range beyond the default, so the
+         Windows address space (relocated above 4 GB on iOS) has room. -->
+    <key>com.apple.developer.kernel.extended-virtual-addressing</key>
+    <true/>
+</dict>
+</plist>

@@ -38,6 +38,10 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.crossoverpad.app
+        # Entitlements the sideload channel applies (JIT, debugger attach,
+        # increased memory, extended VA). Inert under CODE_SIGNING_ALLOWED=NO
+        # in CI; applied when a JIT-capable channel signs the IPA.
+        CODE_SIGN_ENTITLEMENTS: CrossoverPad.entitlements
   CrossoverPadTests:
     type: bundle.unit-test
     platform: iOS

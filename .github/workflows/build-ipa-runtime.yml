@@ -246,12 +246,20 @@ jobs:
           pseudo-process, and the PE loader maps and relocates \`ntdll.dll\`.
           Guest init then hits the known **Apple-arm64 x18/TEB** blocker
           (PE code reads the TEB from x18, which Apple reserves) — the last
-          architectural item, documented in \`docs/HANDOFF-M2.md\`. On a real
-          device the remaining work is that TEB path, an install channel that
-          grants JIT/W^X for the PE loader, and the UIKit/Metal display driver
-          for GUI guests (not yet written). The app reports the runtime tier
-          truthfully and \`NativeWineEngine\` fails with a specific reason
-          rather than pretending to run.
+          architectural item, documented in \`docs/HANDOFF-M2.md\`.
+
+          **Channel capabilities.** JIT/W^X (needed by the PE loader) is
+          available on a debugger-assisted channel such as **StikDebug**, and
+          the raised memory / extended-VA limits are declared in
+          \`CrossoverPad.entitlements\` (increased-memory-limit,
+          extended-virtual-addressing) for the sideload signer to apply.
+          \`EngineCapabilities.jitAvailable()\` probes JIT live (CS_DEBUGGED +
+          an RWX-map attempt) rather than trusting a build flag. That leaves the
+          x18/TEB fix and the UIKit/Metal display driver (GUI only; a console
+          guest needs neither) — and StikDebug's debugger is itself the tool to
+          finish x18/TEB on-device. The app reports the runtime tier truthfully
+          and \`NativeWineEngine\` fails with a specific reason rather than
+          pretending to run.
 
           Built by run ${{ github.run_id }} from ${{ github.sha }}.
           EOF
