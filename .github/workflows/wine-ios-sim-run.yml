@@ -143,10 +143,26 @@ jobs:
           # linker-signed flag from the ad-hoc signature, and AMFI then rejects
           # them (-423, verified). The as-built linker signature is the one
           # the simulator accepts — same class as the hello binary above.
-          echo "=== creating the prefix (wineboot, +module diagnostics) ==="
-          xcrun simctl spawn "$UDID" /usr/bin/env WINEPREFIX="$WP" WINEDEBUG=+err,+module \
+          echo "=== creating the prefix (wineboot, +seh to expose the exception chain) ==="
+          xcrun simctl spawn "$UDID" /usr/bin/env WINEPREFIX="$WP" WINEDEBUG=+err,+seh \
             "$BUILD/loader/wine" wineboot.exe --init >boot.log 2>&1 || true
-          tail -60 boot.log || true
+          tail -80 boot.log || true
+          echo "=== symbolize the recurring PE-ntdll fault ==="
+          # every run faults at the same spot; map it back to a source line.
+          # ntdll.dll links at 0x180000000; the runtime base is in the +module
+          # trace of earlier runs (constant), and the fault addr is in the
+          # stack-overflow line of this one.
+          FAULT=$(grep -o 'stack overflow [0-9]* bytes addr 0x[0-9a-f]*' boot.log | head -1 | awk '{print $NF}')
+          NTDLL_PE="$BUILD/dlls/ntdll/aarch64-windows/ntdll.dll"
+          if [ -n "$FAULT" ] && [ -f "$NTDLL_PE" ]; then
+            RVA=$(( FAULT - 0x6fffffcb0000 ))
+            VA=$(( 0x180000000 + RVA ))
+            printf 'fault %s -> rva 0x%x -> link-time va 0x%x\n' "$FAULT" "$RVA" "$VA"
+            llvm-symbolizer --obj="$NTDLL_PE" "$(printf '0x%x' "$VA")" 2>/dev/null || true
+            llvm-objdump -d --start-address=$(( VA - 0x60 )) --stop-address=$(( VA + 0x40 )) "$NTDLL_PE" 2>/dev/null | tail -45 || true
+          else
+            echo "no stack-overflow line or ntdll.dll missing; skipping symbolization"
+          fi
           echo "=== running: cmd.exe /c echo (by name) ==="
           xcrun simctl spawn "$UDID" /usr/bin/env WINEPREFIX="$WP" WINEDEBUG=+err \
             "$BUILD/loader/wine" cmd.exe /c "echo WINDOWS_RAN_IN_IOS_SIM_%PROCESSOR_ARCHITECTURE%" \
