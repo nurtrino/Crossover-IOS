@@ -1,8 +1,8 @@
 diff --git a/configure.ac b/configure.ac
-index b8ae3db6..807bbae8 100644
+index b8ae3db6..a5e5a8de 100644
 --- a/configure.ac
 +++ b/configure.ac
-@@ -925,6 +925,34 @@ case $host_os in
+@@ -925,6 +925,38 @@ case $host_os in
      LIBEXT="dylib"
      DLLFLAGS="$DLLFLAGS -fPIC"
      LDDLLFLAGS="-fPIC"
@@ -20,6 +20,10 @@ index b8ae3db6..807bbae8 100644
 +    if test "x$wine_cv_target_ios" = xyes
 +    then
 +        enable_winemac_drv=${enable_winemac_drv:-no}
++        dnl PCSC is a macOS-only framework; with pcsclite absent configure
++        dnl auto-disables the winscard module (WINE_NOTICE_WITH below), which
++        dnl is exactly right for iOS.
++        with_pcsclite=${with_pcsclite:-no}
 +        dnl winecoreaudio.drv drives the macOS CoreAudio HAL (AudioObject*
 +        dnl property API), which does not exist on iOS — iOS uses AVAudioSession
 +        dnl instead. Disable it here; audio support is future work.
@@ -37,7 +41,7 @@ index b8ae3db6..807bbae8 100644
      enable_winemac_drv=${enable_winemac_drv:-yes}
      dnl declare needed frameworks
      AC_SUBST(CORETEXT_LIBS,"-framework CoreText")
-@@ -936,8 +964,24 @@ case $host_os in
+@@ -936,8 +968,24 @@ case $host_os in
      AC_SUBST(APPKIT_LIBS,"-framework AppKit")
      AC_SUBST(SECURITY_LIBS,"-framework Security -framework CoreFoundation")
      AC_SUBST(SYSTEMCONFIGURATION_LIBS,"-framework SystemConfiguration")

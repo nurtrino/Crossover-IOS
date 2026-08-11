@@ -74,6 +74,13 @@ jobs:
           rc=$?
           set -e
           tail -30 build.log
+          # a partial build must be loud: a silently failed make left the
+          # PE programs unbuilt for several runs (winscard/PCSC)
+          if [ $rc -ne 0 ]; then
+            echo "::error::make failed (rc=$rc)"
+            grep -B2 -A6 "Error \|error:" build.log | tail -60
+            exit 1
+          fi
           # the pieces the run needs
           for f in loader/wine dlls/ntdll/ntdll.so server/wineserver programs/cmd/x86_64-windows/cmd.exe; do
             if [ -f "$f" ]; then echo "OK  $f ($(file -b "$f" | cut -c1-40))"; else echo "MISSING $f"; fi
