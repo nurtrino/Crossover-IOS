@@ -1,10 +1,38 @@
 # Handoff — M2 (notepad.exe on an iPad)
 
-State at handoff: **Phase 2 complete, Phase 3 cross-build proven.** The
-iOS-native Wine runtime cross-compiles and links as arm64 Mach-O in CI; what
-remains for M2 is device-dependent and cannot be built or verified without
-Apple hardware. This file is the operational map of exactly what is done and
-what is left, so the remaining work is turnkey on a Mac + iPad.
+State at handoff: **Phase 2 complete; Phase 3 cross-build proven AND the
+runtime boots in the iOS Simulator up to one named architectural blocker.**
+The iOS-native Wine runtime cross-compiles and links as arm64 Mach-O, and —
+run for the iOS Simulator in CI — it execs, builds the Windows address space,
+starts wineserver, creates a pseudo-process, and the PE loader maps and
+relocates `ntdll.dll`. Guest init then hits the Apple-arm64 **x18/TEB**
+blocker (§2·0). What remains for M2 is device-dependent and/or this TEB path;
+none of it can be finished from a Linux container. This file is the
+operational map of exactly what is done and what is left.
+
+### iOS Simulator boot chain (verified in CI, `wine-ios-sim-run.yml`)
+
+The one CI-reachable environment that actually *executes* the runtime in an
+iOS ABI. Each stage below is confirmed working from run logs; the list is the
+live progress marker for on-device bring-up.
+
+| stage | status |
+|---|---|
+| full `make` for iOS (loader + all unixlibs + arm64 PE guest) | ✅ |
+| `exec` + dyld + `ntdll.so` load (arm64, linker-signed ad-hoc) | ✅ |
+| Windows address space; KUSER shared-data page relocated to `0x17ffe0000` | ✅ |
+| first TEB/PEB block (2 GB wow64 constraint lifted on iOS) | ✅ |
+| `wineserver` start + client handshake | ✅ |
+| pseudo-process creation, load-order + module search | ✅ |
+| PE loader maps + relocates `ntdll.dll`, loads `apisetschema.dll` | ✅ |
+| guest ntdll init reads TEB via **x18** → fault → exception-dispatch recursion → stack overflow | ❌ **current blocker (§2·0)** |
+
+The low-4 GB address-space problem (NATIVE_PORT Blocker 2) is **solved**: the
+arm64 kernel refuses any mapping below 4 GB (a sub-4 GB `__PAGEZERO` is killed
+at exec; an intermediate one is refused by launchd, error 153 — both proven
+by probe binaries in CI), so the runtime relocates the one ABI-fixed low
+address (KUSER `0x7ffe0000`) above 4 GB via `WINE_KUSER_SHARED_DATA_VA` and
+lets everything else float. That leaves x18/TEB as the last architectural item.
 
 Branch `claude/v1-branch-handoff-1sn5p2`. Read `docs/ROADMAP.md` for the
 milestone view and `native/patches/README.md` for the patch series.
@@ -50,37 +78,61 @@ byte-clean with the full series applied.
 These cannot be done in a Linux CI container. They need a Mac with Xcode and
 a development-mode iPad (or the iOS Simulator for the non-JIT parts).
 
-### 2·0 The app→Wine bootstrap and the address-space blocker (traced)
+### 2·0 The x18/TEB blocker (the current, precisely-pinned stopping point)
 
-The app-side entry is small and well understood — `loader/main.c` is the
-reference and it is ~30 lines of real logic:
+This is now the **first** thing to fix — it is what stops the simulator boot
+chain above, and it is the same problem a device will hit.
 
-1. `init_reserved_areas()` — reserve the Windows address ranges,
-2. `dlopen("ntdll.so")`,
-3. `dlsym(handle, "__wine_main")` and call `__wine_main(argc, argv)`
-   (`__wine_main` is `DECLSPEC_EXPORT` from `dlls/ntdll/unix/loader.c`, so no
-   separate loader binary is needed — the embedded `ntdll.so` exposes it).
+**Symptom.** Every guest process dies identically during ntdll init: a fault
+inside a PE function (`__wine_dbg_get_channel_flags`, ntdll RVA `0x6d6e8`)
+that triggers exception dispatch, which itself faults, recursing until the
+thread stack overflows (`err:virtual:virtual_setup_exception stack overflow`).
+Symbolized from the PE's DWARF; the faulting instruction is
+`ldr x11, [x18, #0x60]`.
 
-For the iOS app this becomes: start the embedded `wineserver` on a thread
-(the `wineserver_run()` entry from patch 0001, as the wineforge harness does
-in `embed_test.c`/`real_client_test.c`), set `WINE_EMBEDDED_SERVER`, point
-`WINEPREFIX` at `WineRuntime/prefix` and the DLL search path at
-`WineRuntime/{lib,pe}`, then `dlopen` + `__wine_main` with argv for a console
-guest. A GUI guest additionally needs 2a; a **console** guest does not.
+**Cause.** On the Windows arm64 ABI, **x18 holds the TEB pointer**, and every
+PE binary (all `*-windows` DLLs) reads the TEB through x18. But **Apple
+reserves x18** as a platform register — the kernel/libplatform may clobber it
+across signal delivery and other transitions, and does. Wine's macOS-arm64
+support maintains x18 = TEB at the boundaries it controls
+(`dlls/ntdll/unix/signal_arm64.c`: `REGn_sig(18, sigcontext) =
+NtCurrentTeb()` in `setup_raise_exception`; `mov x18, teb` in the init thunk;
+save/restore around the syscall dispatcher). On iOS/simulator something on the
+path re-enters PE code with x18 clobbered — most likely a signal delivered
+while in PE code, or an Apple libsystem excursion (the failing sub-4 GB
+`mmap` probes) between syscall boundaries — and the TEB read faults.
 
-**Why this is not wired blind now — the real blocker underneath it.** On
-arm64, `loader/main.c` leaves `wine_main_preload_info = NULL` and
-`init_reserved_areas()` empty; the Windows address space (ntdll's `virtual.c`
-reserves ranges like `0x1000–0x200000000`, the low 8 GB) is claimed via
-`mmap(MAP_FIXED, PROT_NONE)` from inside ntdll. iOS's mmap is heavily
-restricted and the app + dyld shared cache already occupy parts of the
-address space, so whether those reservations succeed **must be determined on
-a device** — it is the classic iOS Wine porting problem (NATIVE_PORT
-Blocker 2). Writing the bootstrap harness before that reservation is made to
-work on-device would produce code that cannot boot and cannot be verified
-here; it is the first thing to build **on the device**, where each mmap
-result is observable. That is why `NativeWineEngine.start()` fails with a
-clear reason today instead of shipping an unverified boot path.
+**Where to work.** `dlls/ntdll/unix/signal_arm64.c` — the `__APPLE__` paths
+are compiled in for the simulator, so the machinery is present but a boundary
+is being missed. This is exactly the kind of thing that wants **lldb on the
+target** (device or simulator on a Mac): break at the init thunk, watch x18
+across the first signal/syscall, and find the transition that drops it.
+Candidate fixes: re-establish x18 = TEB on *every* return-to-PE path (not just
+exception dispatch); or, if a fault handler is itself faulting on x18, harden
+`virtual_setup_exception`/`KiUserExceptionDispatcher` entry to set x18 before
+touching the TEB. Getting this right is the gate to a console guest actually
+running; a GUI guest additionally needs 2a.
+
+**The app→Wine bootstrap** (unchanged, still valid once x18 is fixed): start
+the embedded `wineserver` on a thread (`wineserver_run()` from patch 0001, as
+the wineforge harness does in `embed_test.c`/`real_client_test.c`), set
+`WINE_EMBEDDED_SERVER`, point `WINEPREFIX` at `WineRuntime/prefix` and the DLL
+search path at `WineRuntime/{lib,pe}`, then `dlopen` the embedded `ntdll.so`
+and call its `DECLSPEC_EXPORT __wine_main`. The embedded `WineRuntime/lib/wine`
+loader and native arm64 `WineRuntime/pe/{cmd,wineboot}.exe` are exactly the
+pieces the simulator drove; the IPA ships them so device bring-up is turnkey.
+`NativeWineEngine.start()` still fails with a clear reason rather than shipping
+an unverified boot path.
+
+**Address-space reservation (NATIVE_PORT Blocker 2): solved.** The arm64
+kernel walls off the low 4 GB (a sub-4 GB `__PAGEZERO` is SIGKILL'd at exec;
+an intermediate size is refused by launchd, error 153 — both proven by probe
+binaries in `wine-ios-sim-run.yml`). The runtime keeps the default loader
+layout and relocates the only ABI-fixed low address, KUSER `0x7ffe0000`, to
+`0x17ffe0000` via the `WINE_KUSER_SHARED_DATA_VA` macro (injected into both
+the unix and PE compiler flags by the `configure.ac` iOS branch so both sides
+agree); the 2 GB wow64 TEB-block constraint is lifted on iOS. Verified: the
+KUSER page maps and TEBs allocate in the simulator.
 
 ### 2a. A UIKit/Metal display driver — the piece that puts a window on screen
 
@@ -158,6 +210,9 @@ are the work that starts once this runtime is in hand on a device.
 
 ## 4. The one-line status
 
-M1 done; the iOS runtime cross-compiles and links (arm64 Mach-O, CI-proven);
-M2 = display driver + bundle + on-device verification, all of which need a
-Mac and an iPad and none of which can be faked from a Linux container.
+M1 done; the full iOS runtime cross-compiles, links, and **boots in the iOS
+Simulator** — exec, address space, wineserver, pseudo-process, and PE-loader
+mapping of `ntdll.dll` all verified — stopping at the Apple-arm64 **x18/TEB**
+blocker (§2·0). M2 = fix x18/TEB, then display driver + on-device JIT, the
+last of which need a Mac and an iPad. The address-space reservation problem is
+solved (KUSER relocated above 4 GB).
