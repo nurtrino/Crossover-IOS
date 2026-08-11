@@ -43,11 +43,12 @@ jobs:
           ../native/wine/configure --enable-win64 --without-x --without-freetype \
             --disable-tests >cfg.log 2>&1 || { tail -30 cfg.log; exit 1; }
           make -j3 __tooldeps__ >tools.log 2>&1 || { tail -40 tools.log; exit 1; }
-          # wrc/wmc compute their nls dir as <bindir>/../../nls — i.e.
-          # native-tools/nls — so point that at the checked-in source nls.
-          # locale.nls and the c_*.nls codepage tables ship in the tree; they
-          # are NOT produced by `make nls`.
-          ln -sfn ../native/wine/nls nls
+          # wrc/wmc compute their NLS dir as <bindir>/../../nls = native-tools/nls.
+          # configure created that as a real (VPATH) build subdir, and the build
+          # never populates it — locale.nls and the c_*.nls codepage tables are
+          # checked-in SOURCE files. Copy them into the build dir so resource
+          # compilation in the cross build can load them.
+          cp ../native/wine/nls/*.nls nls/
           ls -l nls/locale.nls
 
       - name: Configure Wine for the iOS Simulator (arm64)
@@ -66,10 +67,8 @@ jobs:
       - name: Build Wine (loader + dlls + cmd.exe)
         run: |
           cd sim-build
-          # wrc resolves nls from its own bindir (native-tools/nls, symlinked
-          # in the tools step); this mirror covers any tool that instead looks
-          # in the current build tree.
-          ln -sfn ../native/wine/nls nls
+          # wrc resolves its NLS dir from its own bindir (native-tools/nls,
+          # populated in the tools step), so no per-tree nls setup is needed here.
           set +e
           make -j3 >build.log 2>&1
           rc=$?
