@@ -77,3 +77,38 @@ index 166fdf3b..c3fd5257 100644
  
      /* We use this run loop source for two purposes.  First, a run loop exits
       * if it has no more sources scheduled.  So, we need at least one source
+diff --git a/dlls/ntdll/unix/server.c b/dlls/ntdll/unix/server.c
+index 982caf5b..d1f51bf4 100644
+--- a/dlls/ntdll/unix/server.c
++++ b/dlls/ntdll/unix/server.c
+@@ -1638,10 +1638,22 @@ static int server_connect(void)
+ 
+ 
+ #ifdef __APPLE__
++#include <TargetConditionals.h>
+ #include <mach/mach.h>
+ #include <mach/mach_error.h>
++#if TARGET_OS_OSX
+ #include <servers/bootstrap.h>
++#endif
+ 
++#if !TARGET_OS_OSX
++/* Crossover-IOS fork, patch 0006: the Mach bootstrap-server API does not
++ * exist on iOS — and the exchange is moot there anyway: the server is a
++ * thread in this same task (patches 0001/0002), so it already holds the
++ * only task port involved. */
++static void send_server_task_port(void)
++{
++}
++#else
+ /* send our task port to the server */
+ static void send_server_task_port(void)
+ {
+@@ -1684,6 +1696,7 @@ static void send_server_task_port(void)
+ 
+     mach_port_deallocate(mach_task_self(), wineserver_port);
+ }
++#endif  /* TARGET_OS_OSX */
+ #endif  /* __APPLE__ */
+ 
+ 
