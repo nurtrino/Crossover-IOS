@@ -2,3 +2,4 @@
 0002-no-fork-embedded-server.patch
 0003-inproc-spawn-and-peb.patch
 0004-inproc-user-session.patch
+0005-forkless-build.patch

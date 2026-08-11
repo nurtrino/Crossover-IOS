@@ -168,3 +168,23 @@ generated with its predecessors applied. Two traps, both hit in practice:
 
 Always finish with the round-trip check:
 `./apply.sh --reverse && ./apply.sh --check && ./apply.sh`.
+
+### 0005-forkless-build.patch
+
+`WINE_FORKLESS` compile mode: the entire runtime fork/exec surface, compiled
+out. Guards `spawn_process_fork`, `exec_wineloader`, `__wine_unix_spawnvp`,
+`fork_and_exec`, `start_server` (client side) and the server's daemonize path
+behind `#ifdef WINE_FORKLESS`; the spawn dispatch makes the in-process
+backend the only backend (no `WINE_INPROC_SPAWN`/`WINE_INPROC_RUN` opt-in),
+and the two model preconditions become hard requirements: a live ntdll PE
+side and a prepared prefix (`native/ios/make-prefix-bundle.sh`). This is the
+compile mode an iOS build uses — fork does not exist there — and it is
+testable on Linux: `native/wineforge/forkless_gate.sh` runs notepad on a warm
+prefix against an externally-started server with exactly one host process.
+Default builds (flag unset) are byte-for-byte unchanged.
+
+NB when regenerating: 0005 overlaps files touched by 0001 (server/request.c),
+0002 (unix/loader.c) and 0003 (unix/process.c), so it must be generated as a
+sequential diff on top of 0001–0004 (temp-commit the base, diff against the
+full tree). `apply.sh --check` validates sequentially by applying and
+unwinding.

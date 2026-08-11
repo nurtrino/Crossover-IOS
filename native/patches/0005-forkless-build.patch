@@ -1,0 +1,183 @@
+diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
+index 476e2993..166fdf3b 100644
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -600,6 +600,12 @@ static NTSTATUS loader_exec( char **argv, WORD machine )
+  */
+ NTSTATUS exec_wineloader( char **argv, int socketfd, const struct pe_image_info *pe_info )
+ {
++#ifdef WINE_FORKLESS
++    /* Crossover-IOS 0005: no exec in the iOS model — children are
++     * in-process thread groups (patch 0003) */
++    ERR( "exec_wineloader not available in a WINE_FORKLESS build\n" );
++    return STATUS_NOT_SUPPORTED;
++#else
+     WORD machine = pe_info->machine;
+     ULONGLONG res_start = pe_info->base;
+     ULONGLONG res_end = pe_info->base + pe_info->map_size;
+@@ -618,6 +624,7 @@ NTSTATUS exec_wineloader( char **argv, int socketfd, const struct pe_image_info
+     putenv( socket_env );
+ 
+     return loader_exec( argv, machine );
++#endif  /* WINE_FORKLESS */
+ }
+ 
+ 
+@@ -671,6 +678,12 @@ void start_server( BOOL debug )
+         fatal_error( "no embedded wineserver present "
+                      "(WINE_EMBEDDED_SERVER set; refusing to fork a server)\n" );
+ 
++#ifdef WINE_FORKLESS
++    /* Crossover-IOS 0005: spawning a server needs posix_spawn; in the
++     * forkless model the server must already be running (embedded thread on
++     * iOS, or externally started for host testing) */
++    fatal_error( "no wineserver running and a WINE_FORKLESS build cannot spawn one\n" );
++#else
+     if (!started)
+     {
+         int status;
+@@ -685,6 +698,7 @@ void start_server( BOOL debug )
+         if (status) exit(status);  /* server failed */
+         started = TRUE;
+     }
++#endif  /* WINE_FORKLESS */
+ }
+ 
+ 
+diff --git a/dlls/ntdll/unix/process.c b/dlls/ntdll/unix/process.c
+index c4d9e315..27958409 100644
+--- a/dlls/ntdll/unix/process.c
++++ b/dlls/ntdll/unix/process.c
+@@ -408,6 +408,12 @@ static BOOL is_unix_console_handle( HANDLE handle )
+ static NTSTATUS spawn_process_fork( const RTL_USER_PROCESS_PARAMETERS *params, int socketfd,
+                                     int unixdir, char *winedebug, const struct pe_image_info *pe_info )
+ {
++#ifdef WINE_FORKLESS
++    /* Crossover-IOS 0005: the iOS model has no fork/exec at all; every
++     * Windows process is an in-process thread group (patch 0003). */
++    ERR( "fork backend not available in a WINE_FORKLESS build\n" );
++    return STATUS_NOT_SUPPORTED;
++#else
+     NTSTATUS status = STATUS_SUCCESS;
+     int stdin_fd = -1, stdout_fd = -1;
+     pid_t pid;
+@@ -466,6 +472,7 @@ static NTSTATUS spawn_process_fork( const RTL_USER_PROCESS_PARAMETERS *params, i
+     if (stdin_fd != -1 && stdin_fd != 0) close( stdin_fd );
+     if (stdout_fd != -1 && stdout_fd != 1) close( stdout_fd );
+     return status;
++#endif  /* WINE_FORKLESS */
+ }
+ 
+ 
+@@ -532,7 +539,11 @@ static void *inproc_process_thread( void *arg )
+      * long tail (docs/DESIGN-0003-inproc-spawn.md "per-process DLL globals").
+      * Gated so the tested attach+map path above cannot regress while that
+      * work proceeds. */
++#ifdef WINE_FORKLESS
++    if (!status)  /* 0005: running in-process is the only way to run at all */
++#else
+     if (!status && getenv( "WINE_INPROC_RUN" ))
++#endif
+     {
+         /* The child enters its PE through the normal path: LdrInitializeThunk
+          * -> loader_init, which (0003g) gives this pseudo-process its own
+@@ -718,6 +729,26 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
+      * needs a live ntdll PE side and system DLLs resolvable from the prefix.
+      * iOS ships a prepared prefix; tracked in docs/DESIGN-0003-inproc-spawn.md.
+      */
++#ifdef WINE_FORKLESS
++    /* Crossover-IOS 0005: the in-process backend is the only backend — no
++     * opt-in and no fork fallback. The two preconditions become hard
++     * requirements: a live ntdll PE side (the first process's own init
++     * spawns nothing) and a prepared prefix (shipped with the app;
++     * native/ios/make-prefix-bundle.sh). */
++    if (!pRtlUserThreadStart || !pLdrInitializeThunk)
++    {
++        ERR( "cannot spawn a child before ntdll's PE side is initialized (no fork exists); "
++             "if this is wineboot, ship a prepared prefix\n" );
++        return STATUS_NOT_SUPPORTED;
++    }
++    if (is_prefix_bootstrap && !prefix_has_system_dlls())
++    {
++        ERR( "cannot spawn a child: the prefix has no system DLLs and no fork exists; "
++             "ship a prepared prefix\n" );
++        return STATUS_NOT_SUPPORTED;
++    }
++    return spawn_process_inproc( params, socketfd, unixdir, winedebug, pe_info );
++#else
+     if (getenv( "WINE_INPROC_SPAWN" ))
+     {
+         if (!pRtlUserThreadStart || !pLdrInitializeThunk)
+@@ -730,6 +761,7 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
+             return spawn_process_inproc( params, socketfd, unixdir, winedebug, pe_info );
+     }
+     return spawn_process_fork( params, socketfd, unixdir, winedebug, pe_info );
++#endif  /* WINE_FORKLESS */
+ }
+ 
+ 
+@@ -738,6 +770,12 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
+  */
+ NTSTATUS WINAPI __wine_unix_spawnvp( char * const argv[], int wait )
+ {
++#ifdef WINE_FORKLESS
++    /* Crossover-IOS 0005: spawning host processes needs fork/exec */
++    ERR( "unix process spawn (%s) not available in a WINE_FORKLESS build\n",
++         argv && argv[0] ? debugstr_a(argv[0]) : "?" );
++    return STATUS_NOT_SUPPORTED;
++#else
+     pid_t pid, wret;
+     int fd[2], status, err;
+ 
+@@ -783,6 +821,7 @@ NTSTATUS WINAPI __wine_unix_spawnvp( char * const argv[], int wait )
+ 
+     close( fd[0] );
+     return err;
++#endif  /* WINE_FORKLESS */
+ }
+ 
+ 
+@@ -832,6 +871,11 @@ NTSTATUS wow64_wine_spawnvp( void *args )
+ static NTSTATUS fork_and_exec( OBJECT_ATTRIBUTES *attr, const char *unix_name, int unixdir,
+                                const RTL_USER_PROCESS_PARAMETERS *params )
+ {
++#ifdef WINE_FORKLESS
++    /* Crossover-IOS 0005: launching unix binaries needs fork/exec */
++    ERR( "unix binary launch (%s) not available in a WINE_FORKLESS build\n", debugstr_a(unix_name) );
++    return STATUS_NOT_SUPPORTED;
++#else
+     pid_t pid;
+     int fd[2], stdin_fd = -1, stdout_fd = -1;
+     char **argv;
+@@ -920,6 +964,7 @@ static NTSTATUS fork_and_exec( OBJECT_ATTRIBUTES *attr, const char *unix_name, i
+     if (stdin_fd != -1 && stdin_fd != 0) close( stdin_fd );
+     if (stdout_fd != -1 && stdout_fd != 1) close( stdout_fd );
+     return status;
++#endif  /* WINE_FORKLESS */
+ }
+ 
+ static NTSTATUS alloc_handle_list( const PS_ATTRIBUTE *handles_attr, obj_handle_t **handles, data_size_t *handles_len )
+diff --git a/server/request.c b/server/request.c
+index bf9e3215..185ab0ac 100644
+--- a/server/request.c
++++ b/server/request.c
+@@ -858,6 +858,11 @@ void open_master_socket(void)
+ 
+     if (!foreground)
+     {
++#ifdef WINE_FORKLESS
++        /* Crossover-IOS 0005: the embedded server (patch 0001) always runs
++         * as a thread in the host, i.e. foreground; daemonizing needs fork */
++        fatal_error( "background server not supported in a WINE_FORKLESS build\n" );
++#else
+         if (pipe( sync_pipe ) == -1) fatal_error( "pipe: %s\n", strerror( errno ));
+         pid = fork();
+         switch( pid )
+@@ -893,6 +898,7 @@ void open_master_socket(void)
+             if (WIFEXITED(status)) _exit( WEXITSTATUS(status) );
+             _exit(1);
+         }
++#endif  /* WINE_FORKLESS */
+     }
+     else  /* remain in the foreground */
+     {

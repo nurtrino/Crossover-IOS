@@ -26,12 +26,28 @@ esac
 mapfile -t patches < <(grep -vE '^\s*(#|$)' "$series")
 [ "$mode" = reverse ] && { min=${#patches[@]}; for ((i=min-1;i>=0;i--)); do rev+=("${patches[i]}"); done; patches=("${rev[@]}"); }
 
+applied_for_check=()
+check_unwind() {
+    for ((j=${#applied_for_check[@]}-1; j>=0; j--)); do
+        git -C "$wine" apply -R "$here/${applied_for_check[j]}" || true
+    done
+}
+
 for p in "${patches[@]}"; do
     f="$here/$p"
     case "$mode" in
         check)
-            git -C "$wine" apply --check "$f" && echo "ok (applies): $p" \
-                || { echo "FAIL (does not apply): $p"; exit 1; } ;;
+            # Patches are sequential diffs, so each must be checked against a
+            # tree with its predecessors applied: apply for real as we go and
+            # unwind at the end (or on failure), leaving the tree untouched.
+            if git -C "$wine" apply --check "$f" && git -C "$wine" apply "$f"; then
+                echo "ok (applies): $p"
+                applied_for_check+=("$p")
+            else
+                echo "FAIL (does not apply): $p"
+                check_unwind
+                exit 1
+            fi ;;
         reverse)
             git -C "$wine" apply -R "$f" && echo "reversed: $p" \
                 || echo "skip (not applied): $p" ;;
@@ -48,4 +64,5 @@ for p in "${patches[@]}"; do
             fi ;;
     esac
 done
+[ "$mode" = check ] && check_unwind >/dev/null
 echo "done ($mode)."
