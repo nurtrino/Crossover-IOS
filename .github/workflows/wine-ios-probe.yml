@@ -67,10 +67,14 @@ jobs:
         continue-on-error: true
         run: |
           cd ios-build
-          # real FILE targets — "make dlls/ntdll" is a no-op directory target
+          # real FILE targets — "make dlls/ntdll" is a no-op directory target.
+          # set +e so the log still prints when make fails (shell runs with -e)
+          set +e
           make -j3 dlls/ntdll/ntdll.so server/wineserver >build-ios.log 2>&1
           rc=$?
-          tail -60 build-ios.log
+          set -e
+          echo "=== build-ios.log (last 100 lines):"
+          tail -100 build-ios.log
           # a passing step REQUIRES both artifacts to exist as arm64 Mach-O —
           # a silent no-op make cannot pass this
           test -f dlls/ntdll/ntdll.so && test -f server/wineserver || exit 1
