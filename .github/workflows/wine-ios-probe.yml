@@ -1,0 +1,94 @@
+name: Wine iOS cross-build probe
+
+# Attempts the real thing: configure + compile the Wine fork's UNIX side
+# (ntdll.so, wineserver) against the iPhoneOS SDK on a macOS runner, with the
+# fork patch series applied and WINE_FORKLESS defined. This is the ground
+# truth for Phase 3 / M2: either it compiles (huge step) or the uploaded
+# config.log/build log enumerates exactly what stands between the verified
+# Linux runtime model and an iPad binary.
+#
+# PE-side DLLs are out of scope here (--without-mingw): they are
+# OS-independent but must be arm64; producing them via llvm-mingw is a
+# separate task tracked in native/ios/README.md.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Apply fork patch series
+        run: cd native/patches && ./apply.sh
+
+      - name: Install build deps (bison >= 3)
+        run: |
+          brew install bison
+          echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
+
+      - name: Build native Wine tools (for cross build)
+        run: |
+          mkdir native-tools && cd native-tools
+          ../native/wine/configure --enable-win64 --without-x --without-freetype \
+            --without-mingw --disable-tests >configure-native.log 2>&1 \
+            || { tail -30 configure-native.log; exit 1; }
+          make -j3 __tooldeps__ >tools.log 2>&1 || { tail -40 tools.log; exit 1; }
+          echo "native tools built"
+
+      - name: Configure for iOS (arm64, iPhoneOS SDK, WINE_FORKLESS)
+        id: conf
+        continue-on-error: true
+        run: |
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          echo "SDK: $SDK"
+          mkdir ios-build && cd ios-build
+          ../native/wine/configure \
+            --host=aarch64-apple-darwin \
+            --with-wine-tools=../native-tools \
+            --without-x --without-freetype --without-mingw --disable-tests \
+            CC="$(xcrun -f clang) -arch arm64 -isysroot $SDK -miphoneos-version-min=16.0 -DWINE_FORKLESS" \
+            CXX="$(xcrun -f clang++) -arch arm64 -isysroot $SDK -miphoneos-version-min=16.0" \
+            > configure-ios.log 2>&1
+          rc=$?
+          tail -25 configure-ios.log
+          exit $rc
+
+      - name: Compile the unix core (ntdll + wineserver)
+        id: build
+        if: steps.conf.outcome == 'success'
+        continue-on-error: true
+        run: |
+          cd ios-build
+          make -j3 dlls/ntdll server >build-ios.log 2>&1
+          rc=$?
+          tail -60 build-ios.log
+          file dlls/ntdll/ntdll.so 2>/dev/null || true
+          file server/wineserver 2>/dev/null || true
+          exit $rc
+
+      - name: Upload probe evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wine-ios-probe-logs
+          path: |
+            ios-build/config.log
+            ios-build/configure-ios.log
+            ios-build/build-ios.log
+            native-tools/configure-native.log
+          if-no-files-found: ignore
+
+      - name: Verdict
+        run: |
+          echo "configure: ${{ steps.conf.outcome }}"
+          echo "compile:   ${{ steps.build.outcome }}"
+          if [ "${{ steps.conf.outcome }}" = "success" ] && [ "${{ steps.build.outcome }}" = "success" ]; then
+            echo "::notice::Wine unix core COMPILES for iOS — M2 cross-build unblocked"
+          else
+            echo "::warning::Probe incomplete — see wine-ios-probe-logs artifact for the exact blockers"
+            exit 1
+          fi
