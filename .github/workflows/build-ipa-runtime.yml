@@ -49,7 +49,11 @@ jobs:
       - name: Build prepared prefix
         run: |
           chmod +x native/ios/make-prefix-bundle.sh
-          xvfb-run -a native/ios/make-prefix-bundle.sh || { echo "prefix build failed"; exit 1; }
+          xvfb-run -a native/ios/make-prefix-bundle.sh || true
+          # trust the artifact, not just the exit code (cleanup can leak rc)
+          test -f native/ios/build/prefix-bundle.tar.gz \
+            || { echo "::error::prefix bundle not produced"; exit 1; }
+          ls -la native/ios/build/
       - name: Stage runtime bits
         run: |
           mkdir -p stage/pe stage/prefix

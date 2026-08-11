@@ -26,7 +26,17 @@ fail() { echo "FAIL: $1"; exit 1; }
 mkdir -p "$out"
 work="$(mktemp -d /tmp/prefix-bundle-XXXXXX)"
 prefix="$work/prefix"
-trap 'WINEPREFIX="$prefix" "$wineserver" -k 2>/dev/null; sleep 1; rm -rf "$work"' EXIT
+# Preserve the script's real exit code across cleanup: killing the server and
+# removing $work can fail (a socket still held, a dir busy) and must NOT turn a
+# successful bundle build into a spurious non-zero exit.
+cleanup() {
+    rc=$?
+    WINEPREFIX="$prefix" "$wineserver" -k 2>/dev/null || true
+    sleep 1
+    rm -rf "$work" 2>/dev/null || true
+    exit "$rc"
+}
+trap cleanup EXIT
 
 echo "==> building prefix from cold (fork fallback allowed at build time)"
 WINEPREFIX="$prefix" WINEDEBUG=-all WINEDLLOVERRIDES="mscoree,mshtml=" \
