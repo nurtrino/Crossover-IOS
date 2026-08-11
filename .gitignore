@@ -14,5 +14,8 @@ build/
 # Guest image build outputs (Phase 3)
 guest/out/
 
+# Prepared-prefix bundle outputs (native/ios/make-prefix-bundle.sh)
+native/ios/build/
+
 # macOS
 .DS_Store

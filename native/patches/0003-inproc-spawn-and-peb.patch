@@ -400,10 +400,10 @@ index cb700dd8..95d6b05f 100644
      return status;
  }
 diff --git a/dlls/ntdll/unix/process.c b/dlls/ntdll/unix/process.c
-index 4c2e7eba..00d89cfd 100644
+index 4c2e7eba..c4d9e315 100644
 --- a/dlls/ntdll/unix/process.c
 +++ b/dlls/ntdll/unix/process.c
-@@ -33,6 +33,7 @@
+@@ -33,12 +33,14 @@
  #include <stdlib.h>
  #include <string.h>
  #include <time.h>
@@ -411,7 +411,14 @@ index 4c2e7eba..00d89cfd 100644
  #include <sys/socket.h>
  #include <sys/time.h>
  #ifdef HAVE_SYS_TIMES_H
-@@ -398,10 +399,13 @@ static BOOL is_unix_console_handle( HANDLE handle )
+ # include <sys/times.h>
+ #endif
+ #include <sys/types.h>
++#include <sys/stat.h>
+ #include <sys/wait.h>
+ #ifdef HAVE_SYS_SYSCTL_H
+ # include <sys/sysctl.h>
+@@ -398,10 +400,13 @@ static BOOL is_unix_console_handle( HANDLE handle )
  
  
  /***********************************************************************
@@ -428,7 +435,7 @@ index 4c2e7eba..00d89cfd 100644
  {
      NTSTATUS status = STATUS_SUCCESS;
      int stdin_fd = -1, stdout_fd = -1;
-@@ -420,7 +424,7 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
+@@ -420,7 +425,7 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
      {
          if (!(pid = fork()))  /* grandchild */
          {
@@ -437,7 +444,7 @@ index 4c2e7eba..00d89cfd 100644
                  params->ConsoleHandle == CONSOLE_HANDLE_ALLOC ||
                  params->ConsoleHandle == CONSOLE_HANDLE_ALLOC_NO_WINDOW ||
                  params->ConsoleHandle == NULL)
-@@ -464,6 +468,244 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
+@@ -464,6 +469,270 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
  }
  
  
@@ -534,6 +541,27 @@ index 4c2e7eba..00d89cfd 100644
 +    return NULL;
 +}
 +
++/* Does the prefix have its system DLLs on disk yet? Distinguishes "the
++ * prefix is still being created" (children must fork — their loader cannot
++ * resolve kernel32) from "warm prefix, wineboot session pass" (children can
++ * run in-process). kernel32.dll is the canonical marker: it is installed by
++ * wine.inf during prefix creation and every child needs it. */
++static BOOL prefix_has_system_dlls(void)
++{
++    static const char system_dll[] = "/drive_c/windows/system32/kernel32.dll";
++    char *path;
++    struct stat st;
++    BOOL ret;
++
++    if (!config_dir) return FALSE;
++    if (!(path = malloc( strlen(config_dir) + sizeof(system_dll) ))) return FALSE;
++    strcpy( path, config_dir );
++    strcat( path, system_dll );
++    ret = !stat( path, &st );
++    free( path );
++    return ret;
++}
++
 +static NTSTATUS spawn_process_inproc( const RTL_USER_PROCESS_PARAMETERS *params, int socketfd,
 +                                      int unixdir, char *winedebug, const struct pe_image_info *pe_info )
 +{
@@ -555,7 +583,7 @@ index 4c2e7eba..00d89cfd 100644
 +     * per-process. The shared fields (session/config data initialized by the
 +     * shared ntdll) stay valid by construction; LdrData and ProcessParameters
 +     * become the child's own when 0003e maps its image and clones params. */
-+    child_peb = anon_mmap_alloc( page_size, PROT_READ | PROT_WRITE );
++    child_peb = anon_mmap_alloc( host_page_round( page_size ), PROT_READ | PROT_WRITE );
 +    if (child_peb == MAP_FAILED)
 +    {
 +        close( fd );
@@ -570,10 +598,10 @@ index 4c2e7eba..00d89cfd 100644
 +    child_peb->LdrData           = NULL;
 +
 +    /* the child's own main-image info: its EXE, not the parent's */
-+    child_image_info = anon_mmap_alloc( page_size, PROT_READ | PROT_WRITE );
++    child_image_info = anon_mmap_alloc( host_page_round( page_size ), PROT_READ | PROT_WRITE );
 +    if (child_image_info == MAP_FAILED)
 +    {
-+        munmap( child_peb, page_size );
++        munmap( child_peb, host_page_round( page_size ) );
 +        close( fd );
 +        return STATUS_NO_MEMORY;
 +    }
@@ -588,8 +616,8 @@ index 4c2e7eba..00d89cfd 100644
 +    {
 +        set_process_server_fd( child_peb, -1 );
 +        set_process_image_info( child_peb, NULL );
-+        munmap( child_image_info, page_size );
-+        munmap( child_peb, page_size );
++        munmap( child_image_info, host_page_round( page_size ) );
++        munmap( child_peb, host_page_round( page_size ) );
 +        close( fd );
 +        return status;
 +    }
@@ -629,8 +657,8 @@ index 4c2e7eba..00d89cfd 100644
 +    set_process_server_fd( child_peb, -1 );
 +    set_process_image_info( child_peb, NULL );
 +    release_process_fd_cache( child_peb );
-+    munmap( child_image_info, page_size );
-+    munmap( child_peb, page_size );
++    munmap( child_image_info, host_page_round( page_size ) );
++    munmap( child_peb, host_page_round( page_size ) );
 +    close( fd );
 +    return status;
 +}
@@ -654,22 +682,27 @@ index 4c2e7eba..00d89cfd 100644
 +     * happened (a cold prefix is created from inside early init), and entering
 +     * a child then jumps to a NULL entry and takes the host down.
 +     *
-+     * The same applies while the prefix itself is being created
-+     * (is_prefix_bootstrap): the child's loader cannot resolve system DLLs
-+     * from a prefix that does not exist yet.
++     * The same applies while the prefix itself is being created: the child's
++     * loader cannot resolve system DLLs from a prefix that does not exist
++     * yet. Note is_prefix_bootstrap alone is NOT that condition — it is set
++     * for the whole wineboot session pass on every cold-server start, warm
++     * prefix included (WINEBOOTSTRAPMODE). The real precondition is whether
++     * the prefix has its system DLLs on disk, so test exactly that: with a
++     * prepared prefix (the iOS model — no fork exists there), the session
++     * pass's own children (services.exe etc.) run in-process too.
 +     *
-+     * Neither case can be served in-process, so fall back to fork rather than
-+     * fail: on the host that makes cold-prefix creation work normally. These
-+     * are the model's real boundary — the in-process backend needs a live
-+     * ntdll PE side and an initialized prefix. iOS has no fork, so it must
-+     * ship a prepared prefix; tracked in docs/DESIGN-0003-inproc-spawn.md.
++     * Neither remaining case can be served in-process, so fall back to fork
++     * rather than fail: on the host that makes cold-prefix creation work
++     * normally. These are the model's real boundary — the in-process backend
++     * needs a live ntdll PE side and system DLLs resolvable from the prefix.
++     * iOS ships a prepared prefix; tracked in docs/DESIGN-0003-inproc-spawn.md.
 +     */
 +    if (getenv( "WINE_INPROC_SPAWN" ))
 +    {
 +        if (!pRtlUserThreadStart || !pLdrInitializeThunk)
 +            WARN( "in-process spawn requested before ntdll's PE side is initialized; "
 +                  "using the fork backend for this child\n" );
-+        else if (is_prefix_bootstrap)
++        else if (is_prefix_bootstrap && !prefix_has_system_dlls())
 +            WARN( "in-process spawn requested during prefix bootstrap; "
 +                  "using the fork backend for this child\n" );
 +        else
@@ -682,7 +715,7 @@ index 4c2e7eba..00d89cfd 100644
  /***********************************************************************
   *           __wine_unix_spawnvp
   */
-@@ -591,7 +833,7 @@ static NTSTATUS fork_and_exec( OBJECT_ATTRIBUTES *attr, const char *unix_name, i
+@@ -591,7 +860,7 @@ static NTSTATUS fork_and_exec( OBJECT_ATTRIBUTES *attr, const char *unix_name, i
          {
              close( fd[0] );
  
@@ -691,7 +724,7 @@ index 4c2e7eba..00d89cfd 100644
                  params->ConsoleHandle == CONSOLE_HANDLE_ALLOC ||
                  params->ConsoleHandle == CONSOLE_HANDLE_ALLOC_NO_WINDOW ||
                  params->ConsoleHandle == NULL)
-@@ -1425,7 +1667,7 @@ NTSTATUS WINAPI NtQueryInformationProcess( HANDLE handle, PROCESSINFOCLASS class
+@@ -1425,7 +1694,7 @@ NTSTATUS WINAPI NtQueryInformationProcess( HANDLE handle, PROCESSINFOCLASS class
          len = sizeof(ULONG_PTR);
          if (size != len) return STATUS_INFO_LENGTH_MISMATCH;
          if (handle == GetCurrentProcess())
@@ -701,7 +734,7 @@ index 4c2e7eba..00d89cfd 100644
          {
              ULONG_PTR val = 0;
 diff --git a/dlls/ntdll/unix/server.c b/dlls/ntdll/unix/server.c
-index 258a959d..13e1d2bc 100644
+index 258a959d..982caf5b 100644
 --- a/dlls/ntdll/unix/server.c
 +++ b/dlls/ntdll/unix/server.c
 @@ -106,6 +106,59 @@ static int initial_cwd = -1;
@@ -782,7 +815,7 @@ index 258a959d..13e1d2bc 100644
          {
              struct cmsghdr *cmsg;
              for (cmsg = CMSG_FIRSTHDR( &msghdr ); cmsg; cmsg = CMSG_NXTHDR( &msghdr, cmsg ))
-@@ -1053,9 +1106,111 @@ C_ASSERT( sizeof(union fd_cache_entry) == sizeof(LONG64) );
+@@ -1053,9 +1106,121 @@ C_ASSERT( sizeof(union fd_cache_entry) == sizeof(LONG64) );
  #define FD_CACHE_BLOCK_SIZE  (65536 / sizeof(union fd_cache_entry))
  #define FD_CACHE_ENTRIES     128
  
@@ -817,6 +850,17 @@ index 258a959d..13e1d2bc 100644
 +static struct { PEB *peb; struct fd_cache_proc *cache; } proc_fd_caches[MAX_PROC_FDS];
 +static pthread_mutex_t proc_fd_caches_lock = PTHREAD_MUTEX_INITIALIZER;
 +
++/* Round a size up so anon_mmap_alloc accepts it on any host page size.
++ * page_size is the fixed 4K *Windows* page; Apple arm64 hosts (the iOS
++ * target, NATIVE_PORT Blocker 2) use 16K pages, so rounding to page_size
++ * alone would trip anon_mmap_alloc's host-page-alignment assert there. */
++SIZE_T host_page_round( SIZE_T size )
++{
++    SIZE_T mask = (SIZE_T)sysconf( _SC_PAGESIZE ) - 1;
++    if (mask < page_size - 1) mask = page_size - 1;
++    return (size + mask) & ~mask;
++}
++
 +static struct fd_cache_proc *current_fd_cache(void)
 +{
 +    PEB *cur = current_peb();
@@ -834,8 +878,7 @@ index 258a959d..13e1d2bc 100644
 +    int free_slot = -1;
 +    unsigned int i;
 +
-+    cache = anon_mmap_alloc( (sizeof(*cache) + page_size - 1) & ~(page_size - 1),
-+                             PROT_READ | PROT_WRITE );
++    cache = anon_mmap_alloc( host_page_round( sizeof(*cache) ), PROT_READ | PROT_WRITE );
 +    if (cache == MAP_FAILED) return STATUS_NO_MEMORY;
 +
 +    pthread_mutex_lock( &proc_fd_caches_lock );
@@ -853,7 +896,7 @@ index 258a959d..13e1d2bc 100644
 +
 +    if (free_slot == -1)
 +    {
-+        munmap( cache, (sizeof(*cache) + page_size - 1) & ~(page_size - 1) );
++        munmap( cache, host_page_round( sizeof(*cache) ) );
 +        return (i < MAX_PROC_FDS) ? STATUS_SUCCESS : STATUS_TOO_MANY_OPENED_FILES;
 +    }
 +    return STATUS_SUCCESS;
@@ -889,13 +932,13 @@ index 258a959d..13e1d2bc 100644
 +        }
 +        munmap( cache->blocks[entry], FD_CACHE_BLOCK_SIZE * sizeof(union fd_cache_entry) );
 +    }
-+    munmap( cache, (sizeof(*cache) + page_size - 1) & ~(page_size - 1) );
++    munmap( cache, host_page_round( sizeof(*cache) ) );
 +}
 +
  static inline unsigned int handle_to_index( HANDLE handle, unsigned int *entry )
  {
      unsigned int idx = (wine_server_obj_handle(handle) >> 2) - 1;
-@@ -1072,6 +1227,7 @@ static inline unsigned int handle_to_index( HANDLE handle, unsigned int *entry )
+@@ -1072,6 +1237,7 @@ static inline unsigned int handle_to_index( HANDLE handle, unsigned int *entry )
  static BOOL add_fd_to_cache( HANDLE handle, int fd, enum server_fd_type type,
                              unsigned int access, unsigned int options )
  {
@@ -903,7 +946,7 @@ index 258a959d..13e1d2bc 100644
      unsigned int entry, idx = handle_to_index( handle, &entry );
      union fd_cache_entry cache;
  
-@@ -1081,15 +1237,15 @@ static BOOL add_fd_to_cache( HANDLE handle, int fd, enum server_fd_type type,
+@@ -1081,15 +1247,15 @@ static BOOL add_fd_to_cache( HANDLE handle, int fd, enum server_fd_type type,
          return FALSE;
      }
  
@@ -922,7 +965,7 @@ index 258a959d..13e1d2bc 100644
          }
      }
  
-@@ -1098,7 +1254,7 @@ static BOOL add_fd_to_cache( HANDLE handle, int fd, enum server_fd_type type,
+@@ -1098,7 +1264,7 @@ static BOOL add_fd_to_cache( HANDLE handle, int fd, enum server_fd_type type,
      cache.s.type = type;
      cache.s.access = access;
      cache.s.options = options;
@@ -931,7 +974,7 @@ index 258a959d..13e1d2bc 100644
      assert( !cache.s.fd );
      return TRUE;
  }
-@@ -1110,12 +1266,13 @@ static BOOL add_fd_to_cache( HANDLE handle, int fd, enum server_fd_type type,
+@@ -1110,12 +1276,13 @@ static BOOL add_fd_to_cache( HANDLE handle, int fd, enum server_fd_type type,
  static inline NTSTATUS get_cached_fd( HANDLE handle, int *fd, enum server_fd_type *type,
                                        unsigned int *access, unsigned int *options )
  {
@@ -947,7 +990,7 @@ index 258a959d..13e1d2bc 100644
      if (!cache.data) return STATUS_INVALID_HANDLE;
  
      /* if fd type is invalid, fd stores an error value */
-@@ -1134,13 +1291,14 @@ static inline NTSTATUS get_cached_fd( HANDLE handle, int *fd, enum server_fd_typ
+@@ -1134,13 +1301,14 @@ static inline NTSTATUS get_cached_fd( HANDLE handle, int *fd, enum server_fd_typ
   */
  static int remove_fd_from_cache( HANDLE handle )
  {
@@ -964,7 +1007,7 @@ index 258a959d..13e1d2bc 100644
          if (cache.s.type != FD_TYPE_INVALID) fd = cache.s.fd - 1;
      }
  
-@@ -1622,6 +1780,11 @@ size_t server_init_process(void)
+@@ -1622,6 +1790,11 @@ size_t server_init_process(void)
          fd_socket = server_connect();
      }
  
@@ -976,7 +1019,7 @@ index 258a959d..13e1d2bc 100644
      /* setup the signal mask */
      sigemptyset( &server_block_set );
      sigaddset( &server_block_set, SIGALRM );
-@@ -1677,7 +1840,7 @@ size_t server_init_process(void)
+@@ -1677,7 +1850,7 @@ size_t server_init_process(void)
              obj_handle_t handle;
              pid               = reply->pid;
              tid               = reply->tid;
@@ -985,7 +1028,7 @@ index 258a959d..13e1d2bc 100644
              info_size         = reply->info_size;
              server_start_time = reply->server_start;
              supported_machines_count = wine_server_reply_size( reply ) / sizeof(*supported_machines);
-@@ -1758,14 +1921,126 @@ void server_init_process_done(void)
+@@ -1758,14 +1931,126 @@ void server_init_process_done(void)
      SERVER_START_REQ( init_process_done )
      {
          req->teb = wine_server_client_ptr( teb );
@@ -1114,7 +1157,7 @@ index 258a959d..13e1d2bc 100644
  }
  
  
-@@ -1952,7 +2227,7 @@ NTSTATUS WINAPI NtClose( HANDLE handle )
+@@ -1952,7 +2237,7 @@ NTSTATUS WINAPI NtClose( HANDLE handle )
      if (fd != -1) close( fd );
  
      if (ret != STATUS_INVALID_HANDLE || !handle) return ret;
@@ -1273,7 +1316,7 @@ index 24cd0587..fff5fb30 100644
                  }
              }
 diff --git a/dlls/ntdll/unix/unix_private.h b/dlls/ntdll/unix/unix_private.h
-index 3932b175..6c0e1e20 100644
+index 3932b175..0689397b 100644
 --- a/dlls/ntdll/unix/unix_private.h
 +++ b/dlls/ntdll/unix/unix_private.h
 @@ -75,6 +75,9 @@ static inline TEB64 *NtCurrentTeb64(void) { return (TEB64 *)NtCurrentTeb()->GdiB
@@ -1323,7 +1366,7 @@ index 3932b175..6c0e1e20 100644
  extern void *create_startup_info( const UNICODE_STRING *nt_image, ULONG process_flags,
                                    const RTL_USER_PROCESS_PARAMETERS *params,
                                    const struct pe_image_info *pe_info, DWORD *info_size );
-@@ -233,6 +259,13 @@ extern unsigned int server_queue_process_apc( HANDLE process, const union apc_ca
+@@ -233,6 +259,14 @@ extern unsigned int server_queue_process_apc( HANDLE process, const union apc_ca
  extern int server_get_unix_fd( HANDLE handle, unsigned int wanted_access, int *unix_fd,
                                 int *needs_close, enum server_fd_type *type, unsigned int *options );
  extern int wine_server_receive_fd( obj_handle_t *handle );
@@ -1332,6 +1375,7 @@ index 3932b175..6c0e1e20 100644
 +extern int current_server_fd(void);
 +extern NTSTATUS alloc_process_fd_cache( PEB *owner );
 +extern void release_process_fd_cache( PEB *owner );
++extern SIZE_T host_page_round( SIZE_T size );
 +extern NTSTATUS server_init_process_inproc( SIZE_T *info_size );
 +extern NTSTATUS server_init_process_done_inproc( BOOL *suspend );
  extern void process_exit_wrapper( int status ) DECLSPEC_NORETURN;
