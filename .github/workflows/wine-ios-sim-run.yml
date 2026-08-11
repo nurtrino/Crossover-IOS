@@ -18,6 +18,66 @@ on:
   workflow_dispatch:
 
 jobs:
+  # Fast, independent measurement of how the iOS Simulator kernel treats x18
+  # across signal delivery/return — the platform behavior behind the guest-init
+  # crash. Runs in parallel with the full build below and reports in ~2 min.
+  x18-probe:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - name: Write + build the probe (arm64 sim, no PAC)
+        run: |
+          cat > probe.c <<'EOF'
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <string.h>
+          #include <signal.h>
+          #include <stdint.h>
+          #include <sys/ucontext.h>
+          #define LIVE    0x1111222233334444ULL
+          #define HANDLER 0xAAAABBBBCCCCDDDDULL
+          extern void capture_stub(void);
+          volatile uint64_t g_x18;
+          __attribute__((used, noreturn)) void report(void) {
+              printf("PROBE x18_at_resume=0x%llx\n", (unsigned long long)g_x18);
+              if (g_x18 == HANDLER)   printf("RESULT=sigreturn_honors_sigcontext_x18\n");
+              else if (g_x18 == LIVE) printf("RESULT=sigreturn_keeps_live_x18_ignores_sigcontext\n");
+              else                    printf("RESULT=x18_wiped_to_0x%llx\n", (unsigned long long)g_x18);
+              fflush(stdout); _exit(0);
+          }
+          __asm__(".globl _capture_stub\n_capture_stub:\n"
+                  "  adrp x9, _g_x18@PAGE\n  add x9, x9, _g_x18@PAGEOFF\n"
+                  "  str x18, [x9]\n  b _report\n");
+          static void handler(int sig, siginfo_t *si, void *ctx) {
+              ucontext_t *uc = (ucontext_t *)ctx;
+              uc->uc_mcontext->__ss.__x[18] = HANDLER;
+              uc->uc_mcontext->__ss.__pc    = (uint64_t)&capture_stub;
+          }
+          int main(void) {
+              struct sigaction sa; memset(&sa, 0, sizeof sa);
+              sa.sa_sigaction = handler; sa.sa_flags = SA_SIGINFO;
+              sigaction(SIGUSR1, &sa, NULL);
+              register uint64_t x18v __asm__("x18"); x18v = LIVE;
+              __asm__ volatile("" : "+r"(x18v));
+              printf("PROBE_START live_x18=0x%llx\n", (unsigned long long)LIVE); fflush(stdout);
+              raise(SIGUSR1);
+              printf("UNREACHABLE (stub did not run)\n"); return 1;
+          }
+          EOF
+          SIMSDK=$(xcrun --sdk iphonesimulator --show-sdk-path)
+          xcrun clang -arch arm64 -isysroot "$SIMSDK" -mios-simulator-version-min=16.0 -O0 -o probe probe.c
+          file probe
+      - name: Boot a simulator and run the probe
+        run: |
+          UDID=$(xcrun simctl list devices available | awk -F '[()]' '/\([0-9A-F-]{36}\)/{print $2; exit}')
+          test -n "$UDID" || { echo "::error::no simulator"; exit 1; }
+          xcrun simctl boot "$UDID" || true
+          xcrun simctl bootstatus "$UDID" -b || true
+          echo "=== probe output ==="
+          xcrun simctl spawn "$UDID" "$PWD/probe" 2>&1 | tee out.txt || echo "(probe exited non-zero)"
+          echo "=== verdict ==="
+          grep "RESULT=" out.txt || echo "no RESULT line — probe crashed (itself informative)"
+
   sim-run:
     runs-on: macos-15
     timeout-minutes: 90
