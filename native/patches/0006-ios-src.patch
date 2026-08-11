@@ -112,3 +112,46 @@ index 982caf5b..d1f51bf4 100644
  #endif  /* __APPLE__ */
  
  
+diff --git a/dlls/ntdll/unix/system.c b/dlls/ntdll/unix/system.c
+index a7d927a4..0775ebe0 100644
+--- a/dlls/ntdll/unix/system.c
++++ b/dlls/ntdll/unix/system.c
+@@ -58,10 +58,17 @@
+ # include <sys/auxv.h>
+ #endif
+ #ifdef __APPLE__
++# include <TargetConditionals.h>
+ # include <CoreFoundation/CoreFoundation.h>
+-# include <IOKit/IOKitLib.h>
+-# include <IOKit/ps/IOPSKeys.h>
+-# include <IOKit/ps/IOPowerSources.h>
++/* Crossover-IOS fork, patch 0006: IOKit headers are macOS-only; the iOS SDK
++ * has neither IOKitLib nor the power-source API. The IOKit consumers below
++ * (SMBIOS-from-IOKit, battery state) are guarded to TARGET_OS_OSX and iOS
++ * takes the generic fallbacks. */
++# if TARGET_OS_OSX
++#  include <IOKit/IOKitLib.h>
++#  include <IOKit/ps/IOPSKeys.h>
++#  include <IOKit/ps/IOPowerSources.h>
++# endif
+ # include <mach/mach.h>
+ # include <mach/machine.h>
+ # include <mach/mach_init.h>
+@@ -2196,7 +2203,7 @@ static struct smbios_prologue *create_smbios_data(void)
+     return buf.prologue;
+ }
+ 
+-#elif defined(__APPLE__)
++#elif defined(__APPLE__) && TARGET_OS_OSX
+ 
+ static struct smbios_prologue *get_smbios_from_iokit(void)
+ {
+@@ -4243,7 +4250,7 @@ static NTSTATUS fill_battery_state( SYSTEM_BATTERY_STATE *bs )
+     return STATUS_SUCCESS;
+ }
+ 
+-#elif defined(__APPLE__)
++#elif defined(__APPLE__) && TARGET_OS_OSX
+ 
+ static NTSTATUS fill_battery_state( SYSTEM_BATTERY_STATE *bs )
+ {
