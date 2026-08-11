@@ -114,9 +114,10 @@ jobs:
           printf '#include <stdio.h>\nint main(void){ printf("HELLO_FROM_SIM\\n"); return 0; }\n' > hello.c
           xcrun clang -arch arm64 -isysroot "$SIMSDK" -mios-simulator-version-min=16.0 -o hello hello.c
           xcrun simctl spawn "$UDID" "$PWD/hello" || echo "hello spawn FAILED rc=$?"
-          echo "=== ad-hoc re-sign the wine binaries (belt and braces) ==="
-          codesign -f -s - "$BUILD/loader/wine" "$BUILD/server/wineserver" 2>&1 | head -4 || true
-          find "$BUILD/dlls" "$BUILD/programs" -name "*.so" -exec codesign -f -s - {} \; 2>/dev/null || true
+          # NB: do NOT codesign -f -s - these binaries. That strips the
+          # linker-signed flag from the ad-hoc signature, and AMFI then rejects
+          # them (-423, verified). The as-built linker signature is the one
+          # the simulator accepts — same class as the hello binary above.
           echo "=== creating the prefix (wineboot) ==="
           xcrun simctl spawn "$UDID" /usr/bin/env WINEPREFIX="$WP" WINEDEBUG=+err \
             "$BUILD/loader/wine" wineboot.exe --init >boot.log 2>&1 || true

@@ -1,5 +1,5 @@
 diff --git a/configure.ac b/configure.ac
-index b8ae3db6..d5555f5c 100644
+index b8ae3db6..354cbe6d 100644
 --- a/configure.ac
 +++ b/configure.ac
 @@ -925,6 +925,34 @@ case $host_os in
@@ -37,14 +37,25 @@ index b8ae3db6..d5555f5c 100644
      enable_winemac_drv=${enable_winemac_drv:-yes}
      dnl declare needed frameworks
      AC_SUBST(CORETEXT_LIBS,"-framework CoreText")
-@@ -936,6 +964,7 @@ case $host_os in
+@@ -936,8 +964,18 @@ case $host_os in
      AC_SUBST(APPKIT_LIBS,"-framework AppKit")
      AC_SUBST(SECURITY_LIBS,"-framework Security -framework CoreFoundation")
      AC_SUBST(SYSTEMCONFIGURATION_LIBS,"-framework SystemConfiguration")
 +    fi
  
      WINELOADER_LDFLAGS="-Wl,-segalign,0x1000,-pagezero_size,0x1000,-sectcreate,__TEXT,__info_plist,loader/wine_info.plist"
++    if test "x$wine_cv_target_ios" = xyes
++    then
++        dnl The arm64 kernel requires a >= 4GB __PAGEZERO and 16KB-aligned
++        dnl segments in a main executable; the 4KB overrides above produce a
++        dnl binary that is killed at exec (SIGKILL, verified in the iOS
++        dnl Simulator). Use the default layout — the 64-bit guest does not
++        dnl need addresses below 4GB.
++        WINELOADER_LDFLAGS="-Wl,-sectcreate,__TEXT,__info_plist,loader/wine_info.plist"
++    fi
  
+     case $HOST_ARCH in
+       i386) wine_use_preloader=yes ;;
 diff --git a/dlls/crypt32/unixlib.c b/dlls/crypt32/unixlib.c
 index 345051cc..8c4cb435 100644
 --- a/dlls/crypt32/unixlib.c
