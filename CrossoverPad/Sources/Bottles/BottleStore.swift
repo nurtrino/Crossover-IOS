@@ -17,8 +17,18 @@ final class BottleStore: ObservableObject {
         bottles.first { $0.id == selectedBottleID }
     }
 
+    /// Picks the real engine when this build embeds a complete Wine runtime
+    /// (a runtime-bearing IPA), otherwise the mock. Either way the engine tier
+    /// shown in the UI is truthful.
+    static func defaultEngine() -> VirtualMachineEngine {
+        if let runtime = WineRuntimeBundle.detect(), runtime.isComplete {
+            return NativeWineEngine(runtime: runtime)
+        }
+        return MockEngine()
+    }
+
     init(
-        engine: VirtualMachineEngine = MockEngine(),
+        engine: VirtualMachineEngine = BottleStore.defaultEngine(),
         directory: URL = .documentsDirectory.appending(path: "Bottles"),
         preview: Bool = false
     ) {

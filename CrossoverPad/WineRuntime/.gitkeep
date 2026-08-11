@@ -1,0 +1,3 @@
+Populated at build time by .github/workflows/build-ipa-runtime.yml with the
+iOS-native Wine libraries (lib/), the Windows PE DLLs (pe/), and the prepared
+prefix (prefix/). Empty in the repo and in shell (build-ipa.yml) builds.

@@ -16,6 +16,9 @@ struct BottleDetailView: View {
             Section("Environment") {
                 LabeledContent("Guest", value: guestLabel)
                 LabeledContent("Engine", value: store.engine.displayName)
+                if let native = store.engine as? NativeWineEngine {
+                    LabeledContent("Runtime", value: native.runtimeStatus)
+                }
                 LabeledContent("Created", value: bottle.createdAt.formatted(date: .abbreviated, time: .shortened))
             }
             Section {

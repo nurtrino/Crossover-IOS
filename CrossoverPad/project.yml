@@ -14,7 +14,16 @@ targets:
   CrossoverPad:
     type: application
     platform: iOS
-    sources: [Sources]
+    sources:
+      - Sources
+      # WineRuntime is populated at build time by the runtime-bearing IPA
+      # pipeline (.github/workflows/build-ipa-runtime.yml): the cross-built
+      # iOS Wine libraries, the OS-independent PE DLLs, and the prepared
+      # prefix. It is a folder reference (kept as-is in the bundle) and is
+      # optional — a plain `build-ipa.yml` shell build simply ships it empty.
+      - path: WineRuntime
+        type: folder
+        optional: true
     info:
       path: Info.plist
       properties:

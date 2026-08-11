@@ -1,0 +1,217 @@
+name: Build runtime-bearing IPA
+
+# Produces an unsigned IPA that actually EMBEDS the Wine runtime:
+#   WineRuntime/lib/     — cross-built iOS-native Wine libs (arm64 Mach-O)
+#   WineRuntime/pe/      — OS-independent Windows PE DLLs
+#   WineRuntime/prefix/  — the prepared Wine prefix
+#
+# This is the artifact for on-device testing. HONEST SCOPE: it contains the
+# real runtime, but launching a GUI guest still needs the iOS display driver
+# and on-device JIT (docs/HANDOFF-M2.md). The app reports the runtime tier
+# truthfully (WineRuntimeBundle) and NativeWineEngine fails with a specific
+# reason rather than pretending to run. The build is fully verifiable; the
+# on-device execution is what the testing phase measures.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (empty = auto rt-ipa-rN)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  # ---- Linux: build Wine, harvest PE DLLs + prepared prefix ---------------
+  linux-runtime:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install deps
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            flex bison gcc-mingw-w64-x86-64 xvfb \
+            libx11-dev libfreetype-dev libxext-dev libxrender-dev \
+            libxrandr-dev libxi-dev libxcursor-dev libxfixes-dev
+      - name: Apply fork patch series
+        run: cd native/patches && ./apply.sh
+      - name: Build Wine (Linux, PE DLLs)
+        run: |
+          mkdir -p native/wine-build && cd native/wine-build
+          ../wine/configure --enable-win64 --disable-tests > cfg.log 2>&1 || { tail -30 cfg.log; exit 1; }
+          make -j"$(nproc)" > build.log 2>&1 || { tail -60 build.log; exit 1; }
+          echo "PE DLLs: $(find dlls -name '*.dll' | wc -l)"
+      - name: Build prepared prefix
+        run: |
+          chmod +x native/ios/make-prefix-bundle.sh
+          xvfb-run -a native/ios/make-prefix-bundle.sh || { echo "prefix build failed"; exit 1; }
+      - name: Stage runtime bits
+        run: |
+          mkdir -p stage/pe stage/prefix
+          # OS-independent PE DLLs (x86_64-windows) — the guest binaries
+          find native/wine-build/dlls -path '*/x86_64-windows/*.dll' -exec cp {} stage/pe/ \;
+          echo "staged $(ls stage/pe | wc -l) PE DLLs"
+          # prepared prefix
+          tar -C stage/prefix -xzf native/ios/build/prefix-bundle.tar.gz
+          cp native/ios/build/prefix-bundle.manifest stage/ || true
+          du -sh stage/pe stage/prefix
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-runtime-bits
+          path: stage/
+          retention-days: 1
+          if-no-files-found: error
+
+  # ---- macOS: cross-build iOS libs, assemble + build the IPA -------------
+  ios-ipa:
+    runs-on: macos-15
+    needs: linux-runtime
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install deps
+        run: |
+          brew install bison llvm lld autoconf xcodegen
+          echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+      - name: Apply fork patch series + regenerate configure
+        run: |
+          cd native/patches && ./apply.sh
+          cd ../wine && autoconf
+
+      - name: Build native Wine tools
+        run: |
+          mkdir native-tools && cd native-tools
+          ../native/wine/configure --enable-win64 --without-x --without-freetype \
+            --disable-tests >cfg.log 2>&1 || { tail -30 cfg.log; exit 1; }
+          make -j3 __tooldeps__ >tools.log 2>&1 || { tail -40 tools.log; exit 1; }
+
+      - name: Cross-build iOS Wine runtime (arm64)
+        run: |
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          mkdir ios-build && cd ios-build
+          ../native/wine/configure \
+            --host=aarch64-apple-darwin --with-wine-tools=../native-tools \
+            --without-x --without-freetype --disable-tests \
+            CC="$(xcrun -f clang) -arch arm64 -isysroot $SDK -miphoneos-version-min=16.0 -DWINE_FORKLESS" \
+            CXX="$(xcrun -f clang++) -arch arm64 -isysroot $SDK -miphoneos-version-min=16.0" \
+            >cfg.log 2>&1 || { tail -30 cfg.log; exit 1; }
+          set +e
+          make -j3 dlls/ntdll/ntdll.so dlls/win32u/win32u.so server/wineserver >build.log 2>&1
+          rc=$?; set -e
+          tail -40 build.log
+          test -f dlls/ntdll/ntdll.so && test -f dlls/win32u/win32u.so && test -f server/wineserver || exit 1
+          for f in dlls/ntdll/ntdll.so dlls/win32u/win32u.so server/wineserver; do
+            file "$f"; file "$f" | grep -q arm64 || exit 1
+          done
+
+      - name: Download Linux runtime bits
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-runtime-bits
+          path: linux-bits
+
+      - name: Assemble WineRuntime into the app source tree
+        run: |
+          RT=CrossoverPad/WineRuntime
+          rm -rf "$RT"; mkdir -p "$RT/lib" "$RT/pe" "$RT/prefix"
+          cp ios-build/dlls/ntdll/ntdll.so ios-build/dlls/win32u/win32u.so ios-build/server/wineserver "$RT/lib/"
+          cp -R linux-bits/pe/. "$RT/pe/"
+          cp -R linux-bits/prefix/prefix/. "$RT/prefix/" 2>/dev/null || cp -R linux-bits/prefix/. "$RT/prefix/"
+          {
+            echo "# WineRuntime bundle assembled $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "libs:    $(ls "$RT/lib" | tr '\n' ' ')"
+            echo "pe dlls: $(ls "$RT/pe" | wc -l)"
+            echo "prefix:  $([ -f "$RT/prefix/drive_c/windows/system32/kernel32.dll" ] && echo present || echo MISSING)"
+          } | tee "$RT/MANIFEST.txt"
+          # sanity: the pieces the app probes for must exist
+          test -f "$RT/lib/ntdll.so" && test -f "$RT/lib/wineserver" || { echo "::error::iOS libs missing"; exit 1; }
+          test "$(ls "$RT/pe" | wc -l)" -gt 100 || { echo "::error::PE DLLs missing"; exit 1; }
+          test -f "$RT/prefix/drive_c/windows/system32/kernel32.dll" || { echo "::error::prefix missing"; exit 1; }
+          du -sh "$RT"
+
+      - name: Generate Xcode project
+        working-directory: CrossoverPad
+        run: xcodegen generate
+
+      - name: Build (Release, unsigned, device slice)
+        working-directory: CrossoverPad
+        run: |
+          set -o pipefail
+          xcodebuild -project CrossoverPad.xcodeproj -scheme CrossoverPad \
+            -configuration Release -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            CONFIGURATION_BUILD_DIR="$PWD/build" build | tail -25
+
+      - name: Verify the app embeds the runtime
+        working-directory: CrossoverPad
+        run: |
+          APP=build/CrossoverPad.app
+          test -d "$APP/WineRuntime/lib" || { echo "::error::WineRuntime not embedded"; exit 1; }
+          test -f "$APP/WineRuntime/lib/ntdll.so" || exit 1
+          test -f "$APP/WineRuntime/prefix/drive_c/windows/system32/kernel32.dll" || exit 1
+          echo "embedded libs:"; ls "$APP/WineRuntime/lib"
+          echo "embedded PE DLLs: $(ls "$APP/WineRuntime/pe" | wc -l)"
+          file "$APP/WineRuntime/lib/ntdll.so"
+          file "$APP/CrossoverPad" | grep -q arm64
+
+      - name: Package IPA
+        working-directory: CrossoverPad
+        run: |
+          rm -rf Payload && mkdir Payload
+          cp -R build/CrossoverPad.app Payload/
+          zip -qry CrossoverPad-runtime-unsigned.ipa Payload
+          echo "IPA size: $(du -h CrossoverPad-runtime-unsigned.ipa | cut -f1)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CrossoverPad-runtime-unsigned.ipa
+          path: CrossoverPad/CrossoverPad-runtime-unsigned.ipa
+          if-no-files-found: error
+
+      - name: Determine tag
+        id: tag
+        run: |
+          if [ -n "${{ github.event.inputs.tag }}" ]; then echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT";
+          else echo "tag=rt-ipa-r${{ github.run_number }}" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Release with direct download link
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/CrossoverPad-runtime-unsigned.ipa"
+          cat > notes.md <<EOF
+          # CrossoverPad — runtime-bearing unsigned IPA
+
+          **Direct download:** ${URL}
+
+          This build EMBEDS the real Wine runtime (unlike the shell IPA):
+          - \`WineRuntime/lib/\` — iOS-native \`ntdll.so\`, \`win32u.so\`,
+            \`wineserver\` (arm64 Mach-O, cross-built against the iPhoneOS SDK
+            with the forkless in-process model),
+          - \`WineRuntime/pe/\` — the Windows PE DLLs,
+          - \`WineRuntime/prefix/\` — the prepared Wine prefix.
+
+          **Honest scope for the testing phase (docs/HANDOFF-M2.md):** the
+          runtime bits are present and verified as arm64, but launching a guest
+          still needs (a) an install channel that grants JIT/W^X for the PE
+          loader, and (b) the iOS UIKit/Metal display driver for GUI programs
+          — that driver is not yet written, so the app reports the runtime tier
+          truthfully and \`NativeWineEngine\` fails with a specific reason
+          rather than pretending to run. This IPA is what makes on-device
+          bring-up (JIT probe, loader, 16 KB pages, TEB) testable on real
+          hardware.
+
+          Built by run ${{ github.run_id }} from ${{ github.sha }}.
+          EOF
+          gh release create "$TAG" CrossoverPad/CrossoverPad-runtime-unsigned.ipa \
+            --title "CrossoverPad runtime-bearing IPA (${TAG})" \
+            --notes-file notes.md --prerelease --target "${{ github.sha }}"
+          echo "Release: https://github.com/${{ github.repository }}/releases/tag/${TAG}"
