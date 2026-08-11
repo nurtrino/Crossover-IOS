@@ -403,7 +403,7 @@ index 982caf5b..d1f51bf4 100644
  
  
 diff --git a/dlls/ntdll/unix/signal_arm64.c b/dlls/ntdll/unix/signal_arm64.c
-index a08175d9..7c4a5d9e 100644
+index a08175d9..0f3fef0d 100644
 --- a/dlls/ntdll/unix/signal_arm64.c
 +++ b/dlls/ntdll/unix/signal_arm64.c
 @@ -26,6 +26,10 @@
@@ -417,7 +417,7 @@ index a08175d9..7c4a5d9e 100644
  #include <assert.h>
  #include <pthread.h>
  #include <signal.h>
-@@ -697,6 +701,41 @@ NTSTATUS get_thread_wow64_context( HANDLE handle, void *ctx, ULONG size )
+@@ -697,6 +701,51 @@ NTSTATUS get_thread_wow64_context( HANDLE handle, void *ctx, ULONG size )
  }
  
  
@@ -436,18 +436,28 @@ index a08175d9..7c4a5d9e 100644
 + */
 +#if defined(__APPLE__) && !TARGET_OS_OSX
 +extern void __wine_ios_teb_trampoline(void);
++/* The kernel restores all GPRs except x18 and resumes here. TEB and the real
++ * resume PC were stashed just below the resume SP (ARM64 has no red zone, but
++ * memory below SP is unused and nothing runs on this stack between sigreturn
++ * and here). Restore x18, then branch via x16 (IP0 — ABI-corruptible by any
++ * call/veneer, so safe to clobber at a resume point). */
 +__ASM_GLOBAL_FUNC( __wine_ios_teb_trampoline,
-+                   "mov x18, x9\n\t"   /* TEB, stashed by resume_with_teb */
-+                   "br x10" )            /* real entry point */
++                   "ldr x18, [sp, #-8]\n\t"    /* TEB */
++                   "ldr x16, [sp, #-16]\n\t"   /* real resume PC */
++                   "br x16" )
 +#endif
 +
-+/* Set the signal context to resume at PC with x18 = TEB, using the iOS
-+ * trampoline where the kernel would otherwise drop x18. */
++/* Set the signal context to resume at PC with x18 = TEB. On iOS the kernel
++ * zeroes x18 on sigreturn regardless of the sigcontext (measured), so route
++ * the resume through a trampoline that reloads x18 from the stack; elsewhere
++ * set x18 directly. Works for both a Windows-side entry point and re-executing
++ * an interrupted instruction, since it clobbers only x16. */
 +static inline void resume_with_teb( ucontext_t *sigcontext, ULONG_PTR pc, ULONG_PTR teb )
 +{
 +#if defined(__APPLE__) && !TARGET_OS_OSX
-+    REGn_sig( 9, sigcontext )  = teb;
-+    REGn_sig( 10, sigcontext ) = pc;
++    ULONG_PTR *sp = (ULONG_PTR *)SP_sig( sigcontext );
++    sp[-1] = teb;   /* [sp-8]  */
++    sp[-2] = pc;    /* [sp-16] */
 +    PC_sig( sigcontext ) = (ULONG_PTR)__wine_ios_teb_trampoline;
 +#else
 +    PC_sig( sigcontext ) = pc;
@@ -459,7 +469,7 @@ index a08175d9..7c4a5d9e 100644
  /***********************************************************************
   *           setup_raise_exception
   */
-@@ -724,8 +763,7 @@ static void setup_raise_exception( ucontext_t *sigcontext, EXCEPTION_RECORD *rec
+@@ -724,8 +773,7 @@ static void setup_raise_exception( ucontext_t *sigcontext, EXCEPTION_RECORD *rec
      stack->pc = stack->context.Pc;
  
      SP_sig(sigcontext) = (ULONG_PTR)stack;
@@ -469,7 +479,7 @@ index a08175d9..7c4a5d9e 100644
  }
  
  
-@@ -1054,9 +1092,8 @@ static BOOL handle_syscall_fault( ucontext_t *context, EXCEPTION_RECORD *rec )
+@@ -1054,9 +1102,8 @@ static BOOL handle_syscall_fault( ucontext_t *context, EXCEPTION_RECORD *rec )
      {
          TRACE( "returning to user mode ip=%p ret=%08x\n", (void *)frame->pc, rec->ExceptionCode );
          REGn_sig(0, context)  = rec->ExceptionCode;
@@ -479,6 +489,23 @@ index a08175d9..7c4a5d9e 100644
 +        resume_with_teb( context, (ULONG_PTR)__wine_syscall_dispatcher_return, (ULONG_PTR)NtCurrentTeb() );
      }
      return TRUE;
+ }
+@@ -1078,7 +1125,15 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+     else if (esr & 0x40) rec.ExceptionInformation[0] = EXCEPTION_WRITE_FAULT;
+     else rec.ExceptionInformation[0] = EXCEPTION_READ_FAULT;
+     rec.ExceptionInformation[1] = (ULONG_PTR)siginfo->si_addr;
+-    if (!virtual_handle_fault( &rec, (void *)SP_sig(context) )) return;
++    if (!virtual_handle_fault( &rec, (void *)SP_sig(context) ))
++    {
++#if defined(__APPLE__) && !TARGET_OS_OSX
++        /* the kernel drops x18 on sigreturn; re-establish TEB for the resumed
++         * (Windows) code, otherwise every later TEB access faults */
++        resume_with_teb( context, PC_sig(context), (ULONG_PTR)NtCurrentTeb() );
++#endif
++        return;
++    }
+     if (handle_syscall_fault( context, &rec )) return;
+     setup_exception( context, &rec );
  }
 diff --git a/dlls/ntdll/unix/system.c b/dlls/ntdll/unix/system.c
 index a7d927a4..0775ebe0 100644
