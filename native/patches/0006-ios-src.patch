@@ -1,5 +1,5 @@
 diff --git a/configure.ac b/configure.ac
-index b8ae3db6..c67eaea6 100644
+index b8ae3db6..807bbae8 100644
 --- a/configure.ac
 +++ b/configure.ac
 @@ -925,6 +925,34 @@ case $host_os in
@@ -37,7 +37,7 @@ index b8ae3db6..c67eaea6 100644
      enable_winemac_drv=${enable_winemac_drv:-yes}
      dnl declare needed frameworks
      AC_SUBST(CORETEXT_LIBS,"-framework CoreText")
-@@ -936,8 +964,20 @@ case $host_os in
+@@ -936,8 +964,24 @@ case $host_os in
      AC_SUBST(APPKIT_LIBS,"-framework AppKit")
      AC_SUBST(SECURITY_LIBS,"-framework Security -framework CoreFoundation")
      AC_SUBST(SYSTEMCONFIGURATION_LIBS,"-framework SystemConfiguration")
@@ -46,14 +46,18 @@ index b8ae3db6..c67eaea6 100644
      WINELOADER_LDFLAGS="-Wl,-segalign,0x1000,-pagezero_size,0x1000,-sectcreate,__TEXT,__info_plist,loader/wine_info.plist"
 +    if test "x$wine_cv_target_ios" = xyes
 +    then
-+        dnl arm64 rejects the 4KB segalign/pagezero overrides above (the
-+        dnl kernel kills the binary at exec — verified in the iOS Simulator),
-+        dnl but a full 4GB __PAGEZERO covers 0x7ffe0000, where Windows
-+        dnl hardcodes the KUSER_SHARED_DATA page, and ntdll then fails with
-+        dnl "failed to map the shared user data" (also verified). End the
-+        dnl page zero exactly at 0x7ffe0000 (16KB-aligned) so that page and
-+        dnl the rest of the low-4GB tail stay mappable.
-+        WINELOADER_LDFLAGS="-Wl,-pagezero_size,0x7ffe0000,-sectcreate,__TEXT,__info_plist,loader/wine_info.plist"
++        dnl The arm64 kernel walls off the low 4GB of an arm64 process: the
++        dnl 4KB segalign/pagezero overrides above are killed at exec, and an
++        dnl intermediate page zero (tried 0x7ffe0000) is refused by launchd —
++        dnl both verified in the iOS Simulator. Keep the default layout and
++        dnl relocate the Windows shared-user-data page above 4GB instead:
++        dnl every Wine reference goes through WINE_KUSER_SHARED_DATA_VA,
++        dnl injected here into BOTH the unix side and the PE side so they
++        dnl agree. (Foreign binaries hardcoding 0x7ffe0000 are a known
++        dnl limitation of the iOS port.)
++        WINELOADER_LDFLAGS="-Wl,-sectcreate,__TEXT,__info_plist,loader/wine_info.plist"
++        CFLAGS="$CFLAGS -DWINE_KUSER_SHARED_DATA_VA=0x17ffe0000"
++        aarch64_CFLAGS="$aarch64_CFLAGS -DWINE_KUSER_SHARED_DATA_VA=0x17ffe0000"
 +    fi
  
      case $HOST_ARCH in
@@ -81,6 +85,72 @@ index 345051cc..8c4cb435 100644
  #ifdef __APPLE__
  #include <Security/Security.h>
  #endif
+diff --git a/dlls/kernel32/process.c b/dlls/kernel32/process.c
+index 23ec8ce7..00a4816a 100644
+--- a/dlls/kernel32/process.c
++++ b/dlls/kernel32/process.c
+@@ -40,7 +40,16 @@
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(process);
+ 
+-static const struct _KUSER_SHARED_DATA *user_shared_data = (struct _KUSER_SHARED_DATA *)0x7ffe0000;
++/* Crossover-IOS fork, patch 0006: on iOS the arm64 kernel walls off the low
++ * 4GB of the address space, so the shared user data page cannot live at its
++ * Windows ABI address 0x7ffe0000. Every Wine reference goes through this
++ * macro; iOS builds inject an above-4GB value from configure so the unix
++ * side and all Wine PE dlls stay in agreement. */
++#ifndef WINE_KUSER_SHARED_DATA_VA
++#define WINE_KUSER_SHARED_DATA_VA 0x7ffe0000
++#endif
++
++static const struct _KUSER_SHARED_DATA *user_shared_data = (struct _KUSER_SHARED_DATA *)WINE_KUSER_SHARED_DATA_VA;
+ 
+ typedef struct
+ {
+diff --git a/dlls/kernel32/sync.c b/dlls/kernel32/sync.c
+index b354b1c5..e75b04a9 100644
+--- a/dlls/kernel32/sync.c
++++ b/dlls/kernel32/sync.c
+@@ -43,7 +43,16 @@
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(sync);
+ 
+-static const struct _KUSER_SHARED_DATA *user_shared_data = (struct _KUSER_SHARED_DATA *)0x7ffe0000;
++/* Crossover-IOS fork, patch 0006: on iOS the arm64 kernel walls off the low
++ * 4GB of the address space, so the shared user data page cannot live at its
++ * Windows ABI address 0x7ffe0000. Every Wine reference goes through this
++ * macro; iOS builds inject an above-4GB value from configure so the unix
++ * side and all Wine PE dlls stay in agreement. */
++#ifndef WINE_KUSER_SHARED_DATA_VA
++#define WINE_KUSER_SHARED_DATA_VA 0x7ffe0000
++#endif
++
++static const struct _KUSER_SHARED_DATA *user_shared_data = (struct _KUSER_SHARED_DATA *)WINE_KUSER_SHARED_DATA_VA;
+ 
+ 
+ static void get_create_object_attributes( OBJECT_ATTRIBUTES *attr, UNICODE_STRING *nameW,
+diff --git a/dlls/kernelbase/sync.c b/dlls/kernelbase/sync.c
+index 3948f7ea..7c9194db 100644
+--- a/dlls/kernelbase/sync.c
++++ b/dlls/kernelbase/sync.c
+@@ -40,7 +40,16 @@
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(sync);
+ 
+-static const struct _KUSER_SHARED_DATA *user_shared_data = (struct _KUSER_SHARED_DATA *)0x7ffe0000;
++/* Crossover-IOS fork, patch 0006: on iOS the arm64 kernel walls off the low
++ * 4GB of the address space, so the shared user data page cannot live at its
++ * Windows ABI address 0x7ffe0000. Every Wine reference goes through this
++ * macro; iOS builds inject an above-4GB value from configure so the unix
++ * side and all Wine PE dlls stay in agreement. */
++#ifndef WINE_KUSER_SHARED_DATA_VA
++#define WINE_KUSER_SHARED_DATA_VA 0x7ffe0000
++#endif
++
++static const struct _KUSER_SHARED_DATA *user_shared_data = (struct _KUSER_SHARED_DATA *)WINE_KUSER_SHARED_DATA_VA;
+ 
+ /* check if current version is NT or Win95 */
+ static inline BOOL is_version_nt(void)
 diff --git a/dlls/mountmgr.sys/cred.c b/dlls/mountmgr.sys/cred.c
 index 791e9704..167048b3 100644
 --- a/dlls/mountmgr.sys/cred.c
@@ -192,6 +262,28 @@ index a13d77a4..296720c2 100644
  #ifdef __APPLE__
  #include <sys/ioctl.h>
  #include <sys/kern_event.h>
+diff --git a/dlls/ntdll/thread.c b/dlls/ntdll/thread.c
+index 3d1e6e0f..c2676f3f 100644
+--- a/dlls/ntdll/thread.c
++++ b/dlls/ntdll/thread.c
+@@ -36,7 +36,16 @@ WINE_DECLARE_DEBUG_CHANNEL(relay);
+ WINE_DECLARE_DEBUG_CHANNEL(pid);
+ WINE_DECLARE_DEBUG_CHANNEL(timestamp);
+ 
+-struct _KUSER_SHARED_DATA *user_shared_data = (void *)0x7ffe0000;
++/* Crossover-IOS fork, patch 0006: on iOS the arm64 kernel walls off the low
++ * 4GB of the address space, so the shared user data page cannot live at its
++ * Windows ABI address 0x7ffe0000. Every Wine reference goes through this
++ * macro; iOS builds inject an above-4GB value from configure so the unix
++ * side and all Wine PE dlls stay in agreement. */
++#ifndef WINE_KUSER_SHARED_DATA_VA
++#define WINE_KUSER_SHARED_DATA_VA 0x7ffe0000
++#endif
++
++struct _KUSER_SHARED_DATA *user_shared_data = (void *)WINE_KUSER_SHARED_DATA_VA;
+ 
+ struct debug_info
+ {
 diff --git a/dlls/ntdll/unix/cdrom.c b/dlls/ntdll/unix/cdrom.c
 index 08365087..fdd32e25 100644
 --- a/dlls/ntdll/unix/cdrom.c
@@ -350,7 +442,7 @@ index a7d927a4..0775ebe0 100644
  static NTSTATUS fill_battery_state( SYSTEM_BATTERY_STATE *bs )
  {
 diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
-index 69bc6d16..dc10e72f 100644
+index 69bc6d16..b6afbe1d 100644
 --- a/dlls/ntdll/unix/virtual.c
 +++ b/dlls/ntdll/unix/virtual.c
 @@ -65,12 +65,52 @@
@@ -407,6 +499,68 @@ index 69bc6d16..dc10e72f 100644
  #endif
  
  #if defined(HAVE_LINUX_USERFAULTFD_H) && defined(HAVE_LINUX_FS_H)
+@@ -202,7 +242,16 @@ static void *host_addr_space_limit;  /* top of the host virtual address space */
+ static struct file_view *arm64ec_view;
+ 
+ ULONG_PTR user_space_wow_limit = 0;
+-struct _KUSER_SHARED_DATA *user_shared_data = (void *)0x7ffe0000;
++/* Crossover-IOS fork, patch 0006: on iOS the arm64 kernel walls off the low
++ * 4GB of the address space, so the shared user data page cannot live at its
++ * Windows ABI address 0x7ffe0000. Every Wine reference goes through this
++ * macro; iOS builds inject an above-4GB value from configure so the unix
++ * side and all Wine PE dlls stay in agreement. */
++#ifndef WINE_KUSER_SHARED_DATA_VA
++#define WINE_KUSER_SHARED_DATA_VA 0x7ffe0000
++#endif
++
++struct _KUSER_SHARED_DATA *user_shared_data = (void *)WINE_KUSER_SHARED_DATA_VA;
+ 
+ /* TEB allocation blocks */
+ static void *teb_block;
+diff --git a/dlls/ntoskrnl.exe/instr.c b/dlls/ntoskrnl.exe/instr.c
+index 03f48152..5e08ec5e 100644
+--- a/dlls/ntoskrnl.exe/instr.c
++++ b/dlls/ntoskrnl.exe/instr.c
+@@ -491,7 +491,16 @@ WINE_DEFAULT_DEBUG_CHANNEL(int);
+ #define SIB_BASE( sib, rex )    (((sib) & 7) | (((rex) & REX_B) ? 8 : 0))
+ 
+ /* keep in sync with dlls/ntdll/thread.c:thread_init */
+-static const BYTE *wine_user_shared_data = (BYTE *)0x7ffe0000;
++/* Crossover-IOS fork, patch 0006: on iOS the arm64 kernel walls off the low
++ * 4GB of the address space, so the shared user data page cannot live at its
++ * Windows ABI address 0x7ffe0000. Every Wine reference goes through this
++ * macro; iOS builds inject an above-4GB value from configure so the unix
++ * side and all Wine PE dlls stay in agreement. */
++#ifndef WINE_KUSER_SHARED_DATA_VA
++#define WINE_KUSER_SHARED_DATA_VA 0x7ffe0000
++#endif
++
++static const BYTE *wine_user_shared_data = (BYTE *)WINE_KUSER_SHARED_DATA_VA;
+ static const BYTE *user_shared_data      = (BYTE *)0xfffff78000000000;
+ 
+ static inline DWORD64 *get_int_reg( CONTEXT *context, int index )
+diff --git a/dlls/win32u/message.c b/dlls/win32u/message.c
+index 58eeb046..3126ba5c 100644
+--- a/dlls/win32u/message.c
++++ b/dlls/win32u/message.c
+@@ -46,7 +46,16 @@ WINE_DECLARE_DEBUG_CHANNEL(relay);
+ #define QS_HARDWARE     0x40000000
+ #define QS_INTERNAL     (QS_DRIVER | QS_HARDWARE)
+ 
+-static const struct _KUSER_SHARED_DATA *user_shared_data = (struct _KUSER_SHARED_DATA *)0x7ffe0000;
++/* Crossover-IOS fork, patch 0006: on iOS the arm64 kernel walls off the low
++ * 4GB of the address space, so the shared user data page cannot live at its
++ * Windows ABI address 0x7ffe0000. Every Wine reference goes through this
++ * macro; iOS builds inject an above-4GB value from configure so the unix
++ * side and all Wine PE dlls stay in agreement. */
++#ifndef WINE_KUSER_SHARED_DATA_VA
++#define WINE_KUSER_SHARED_DATA_VA 0x7ffe0000
++#endif
++
++static const struct _KUSER_SHARED_DATA *user_shared_data = (struct _KUSER_SHARED_DATA *)WINE_KUSER_SHARED_DATA_VA;
+ 
+ static LONG atomic_load_long( const volatile LONG *ptr )
+ {
 diff --git a/dlls/winebus.sys/bus_iohid.c b/dlls/winebus.sys/bus_iohid.c
 index 0b9a0c52..c1a7155b 100644
 --- a/dlls/winebus.sys/bus_iohid.c
