@@ -151,8 +151,19 @@ Groundwork done on Linux (see `native/ios/README.md` for the full map):
       runner builds CrossoverPad unsigned (arm64, iOS 17+), runs the unit
       tests on a simulator, packages the IPA, and publishes a GitHub release
       with a direct download link.
-Still needs a Mac (the M2 blockers):
-- [ ] Cross-build the fork against the iOS SDK (winelib static libs + dylibs)
+Cross-build now proven in CI (`.github/workflows/wine-ios-probe.yml`):
+- [x] **Wine unix core cross-compiles for iOS arm64** — `dlls/ntdll/ntdll.so`
+      and `wineserver` build against the iPhoneOS SDK with the full patch
+      series applied and `WINE_FORKLESS` defined, verified as arm64 Mach-O on
+      a GitHub macOS runner. The iOS source port is patch 0006 (six files:
+      cdrom/file/loader/system/virtual, and a new `USE_INPROC_TRACE` server
+      backend), each a macOS→iOS narrowing that leaves the macOS and Linux
+      builds untouched. This retires the "needs a Mac to even try" unknown —
+      the cross toolchain (Xcode clang + iPhoneOS SDK + Homebrew LLVM for PE)
+      is captured in the probe workflow.
+Remaining for M2 (a device or richer host harness):
+- [ ] Cross-build the PE side for arm64-windows (llvm-mingw) + link a loadable
+      dylib and bundle it in the app
 - [ ] 16 KB-page mmap/section-mapping verification on-device; TEB register plumbing
 - [ ] Dev-channel harness (TrollStore/jailbreak) for on-device iteration
 - [ ] Render Wine's display into a `CAMetalLayer` via a UIKit winedrv stub

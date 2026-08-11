@@ -188,3 +188,32 @@ NB when regenerating: 0005 overlaps files touched by 0001 (server/request.c),
 sequential diff on top of 0001–0004 (temp-commit the base, diff against the
 full tree). `apply.sh --check` validates sequentially by applying and
 unwinding.
+
+### 0006-ios-src.patch
+
+The iOS source port of the Wine unix side: the changes needed for
+`dlls/ntdll/ntdll.so` and `wineserver` to cross-compile against the iPhoneOS
+SDK (arm64), verified in CI by `.github/workflows/wine-ios-probe.yml`. Each
+hunk narrows a macOS-only assumption to `TARGET_OS_OSX` and gives iOS a
+working path:
+
+- **cdrom.c** — optical-drive ioctls use macOS-only `<sys/disk.h>`/IOKit
+  storage headers; iOS has no optical hardware, so take the generic paths.
+- **file.c** — `getattrlist`/`FIODTYPE` exist on iOS but their constants
+  (`VLNK`, `D_TAPE/D_DISK/D_TTY`) are not in the SDK; provide the stable xnu
+  ABI values.
+- **loader.c** — Carbon Multiprocessing Services and the distributed
+  notification center are macOS-only warmups; skip on iOS.
+- **system.c** — SMBIOS-from-IOKit and the IOPowerSources battery API are
+  macOS-only; iOS takes the generic SMBIOS/battery fallbacks.
+- **virtual.c** — the iOS SDK hard-errors on `<mach/mach_vm.h>`; provide
+  `mach_vm_map/deallocate/region` as thin wrappers over the legacy `vm_*`
+  calls (same operations, same-width LP64 types).
+- **server/mach.c + server/process.h** — no Mach debugger API and no usable
+  ptrace on iOS; a new `USE_INPROC_TRACE` backend does cross-process memory
+  as a direct copy (all pseudo-processes share the server's address space)
+  and stubs the suspend/context plumbing.
+
+Compiled ONLY when targeting iOS (`TARGET_OS_IPHONE`); the macOS and Linux
+builds are unaffected (the default Linux `ntdll.so`/`wineserver` build is
+verified byte-clean with the series applied).
