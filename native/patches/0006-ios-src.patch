@@ -1,8 +1,8 @@
 diff --git a/configure.ac b/configure.ac
-index b8ae3db6..86a170e7 100644
+index b8ae3db6..d5555f5c 100644
 --- a/configure.ac
 +++ b/configure.ac
-@@ -925,6 +925,30 @@ case $host_os in
+@@ -925,6 +925,34 @@ case $host_os in
      LIBEXT="dylib"
      DLLFLAGS="$DLLFLAGS -fPIC"
      LDDLLFLAGS="-fPIC"
@@ -20,6 +20,10 @@ index b8ae3db6..86a170e7 100644
 +    if test "x$wine_cv_target_ios" = xyes
 +    then
 +        enable_winemac_drv=${enable_winemac_drv:-no}
++        dnl winecoreaudio.drv drives the macOS CoreAudio HAL (AudioObject*
++        dnl property API), which does not exist on iOS — iOS uses AVAudioSession
++        dnl instead. Disable it here; audio support is future work.
++        enable_winecoreaudio_drv=${enable_winecoreaudio_drv:-no}
 +        AC_SUBST(CORETEXT_LIBS,"-framework CoreText")
 +        AC_SUBST(COREFOUNDATION_LIBS,"-framework CoreFoundation")
 +        AC_SUBST(DISKARBITRATION_LIBS,"")
@@ -33,7 +37,7 @@ index b8ae3db6..86a170e7 100644
      enable_winemac_drv=${enable_winemac_drv:-yes}
      dnl declare needed frameworks
      AC_SUBST(CORETEXT_LIBS,"-framework CoreText")
-@@ -936,6 +960,7 @@ case $host_os in
+@@ -936,6 +964,7 @@ case $host_os in
      AC_SUBST(APPKIT_LIBS,"-framework AppKit")
      AC_SUBST(SECURITY_LIBS,"-framework Security -framework CoreFoundation")
      AC_SUBST(SYSTEMCONFIGURATION_LIBS,"-framework SystemConfiguration")
@@ -41,6 +45,70 @@ index b8ae3db6..86a170e7 100644
  
      WINELOADER_LDFLAGS="-Wl,-segalign,0x1000,-pagezero_size,0x1000,-sectcreate,__TEXT,__info_plist,loader/wine_info.plist"
  
+diff --git a/dlls/crypt32/unixlib.c b/dlls/crypt32/unixlib.c
+index 345051cc..8c4cb435 100644
+--- a/dlls/crypt32/unixlib.c
++++ b/dlls/crypt32/unixlib.c
+@@ -29,6 +29,18 @@
+ #include <unistd.h>
+ #include <dlfcn.h>
+ #include <sys/stat.h>
++/* Crossover-IOS fork, patch 0006: the macOS root-cert backend below uses
++ * Security.framework trust-settings APIs (SecTrustSettingsCopyCertificates,
++ * SecItemExport, kSecFormatX509Cert) that exist only on macOS, not on iOS or
++ * the iOS Simulator. Narrow every __APPLE__ block in this file to macOS by
++ * un-defining __APPLE__ on non-macOS Apple targets; iOS then falls through to
++ * the generic file-path certificate loading (CRYPT_knownLocations). */
++#ifdef __APPLE__
++# include <TargetConditionals.h>
++# if !TARGET_OS_OSX
++#  undef __APPLE__
++# endif
++#endif
+ #ifdef __APPLE__
+ #include <Security/Security.h>
+ #endif
+diff --git a/dlls/mountmgr.sys/cred.c b/dlls/mountmgr.sys/cred.c
+index 791e9704..167048b3 100644
+--- a/dlls/mountmgr.sys/cred.c
++++ b/dlls/mountmgr.sys/cred.c
+@@ -27,6 +27,16 @@
+ #include <stdarg.h>
+ #include <stdlib.h>
+ 
++/* Crossover-IOS fork, patch 0006: the macOS Keychain credential backend below
++ * (Security.framework) is unavailable on iOS / the iOS Simulator; un-define
++ * __APPLE__ on non-macOS Apple targets so the generic not-supported fallback
++ * is compiled. */
++#ifdef __APPLE__
++# include <TargetConditionals.h>
++# if !TARGET_OS_OSX
++#  undef __APPLE__
++# endif
++#endif
+ #ifdef __APPLE__
+ #include <CoreFoundation/CFString.h>
+ #define LoadResource mac_LoadResource
+diff --git a/dlls/mountmgr.sys/diskarb.c b/dlls/mountmgr.sys/diskarb.c
+index 8c81d679..8ad756e9 100644
+--- a/dlls/mountmgr.sys/diskarb.c
++++ b/dlls/mountmgr.sys/diskarb.c
+@@ -31,6 +31,15 @@
+ #include <stdio.h>
+ #include <unistd.h>
+ #include <sys/ioctl.h>
++/* Crossover-IOS fork, patch 0006: DiskArbitration / SystemConfiguration are
++ * macOS-only frameworks, absent on iOS / the iOS Simulator; un-define __APPLE__
++ * on non-macOS Apple targets so the no-op fallback is compiled. */
++#ifdef __APPLE__
++# include <TargetConditionals.h>
++# if !TARGET_OS_OSX
++#  undef __APPLE__
++# endif
++#endif
+ #ifdef __APPLE__
+ #include <DiskArbitration/DiskArbitration.h>
+ #include <SystemConfiguration/SCDynamicStoreCopyDHCPInfo.h>
 diff --git a/dlls/ntdll/unix/cdrom.c b/dlls/ntdll/unix/cdrom.c
 index 08365087..fdd32e25 100644
 --- a/dlls/ntdll/unix/cdrom.c
@@ -256,6 +324,47 @@ index 69bc6d16..dc10e72f 100644
  #endif
  
  #if defined(HAVE_LINUX_USERFAULTFD_H) && defined(HAVE_LINUX_FS_H)
+diff --git a/dlls/winebus.sys/bus_iohid.c b/dlls/winebus.sys/bus_iohid.c
+index 0b9a0c52..c1a7155b 100644
+--- a/dlls/winebus.sys/bus_iohid.c
++++ b/dlls/winebus.sys/bus_iohid.c
+@@ -26,6 +26,15 @@
+ #include <stdarg.h>
+ #include <sys/types.h>
+ 
++/* Crossover-IOS fork, patch 0006: the IOKit HID gamepad backend below is
++ * macOS-only (iOS has no IOKit HID manager); un-define __APPLE__ on non-macOS
++ * Apple targets so the not-implemented fallback is compiled. */
++#ifdef __APPLE__
++# include <TargetConditionals.h>
++# if !TARGET_OS_OSX
++#  undef __APPLE__
++# endif
++#endif
+ #ifdef __APPLE__
+ #define DWORD UInt32
+ #define LPDWORD UInt32*
+diff --git a/dlls/winspool.drv/cups.c b/dlls/winspool.drv/cups.c
+index 02e0bdfc..ba5e64d9 100644
+--- a/dlls/winspool.drv/cups.c
++++ b/dlls/winspool.drv/cups.c
+@@ -41,6 +41,16 @@
+ #include <cups/ppd.h>
+ #endif
+ 
++/* Crossover-IOS fork, patch 0006: ApplicationServices is a macOS-only
++ * framework (absent on iOS / the iOS Simulator) and CUPS is not present on
++ * iOS; un-define __APPLE__ on non-macOS Apple targets so the generic no-CUPS
++ * path is compiled. */
++#ifdef __APPLE__
++# include <TargetConditionals.h>
++# if !TARGET_OS_OSX
++#  undef __APPLE__
++# endif
++#endif
+ #ifdef __APPLE__
+ #define GetCurrentProcess GetCurrentProcess_Mac
+ #define GetCurrentThread GetCurrentThread_Mac
 diff --git a/server/mach.c b/server/mach.c
 index 0f75d892..946bb54a 100644
 --- a/server/mach.c
