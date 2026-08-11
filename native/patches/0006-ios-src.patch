@@ -1,3 +1,46 @@
+diff --git a/configure.ac b/configure.ac
+index b8ae3db6..86a170e7 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -925,6 +925,30 @@ case $host_os in
+     LIBEXT="dylib"
+     DLLFLAGS="$DLLFLAGS -fPIC"
+     LDDLLFLAGS="-fPIC"
++    dnl Crossover-IOS fork, patch 0007: distinguish iOS from macOS. The host
++    dnl triplet (aarch64-apple-darwin) is identical for both, so probe the SDK
++    dnl via TargetConditionals. On iOS the AppKit-based winemac driver and
++    dnl several macOS-only frameworks (AppKit, DiskArbitration, IOKit-as-
++    dnl framework, ApplicationServices, CoreServices) do not exist; blank them
++    dnl and disable winemac_drv. The Metal/UIKit display driver is future work.
++    AC_CACHE_CHECK([whether we are building for iOS],[wine_cv_target_ios],
++      [AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[#include <TargetConditionals.h>
++#if !TARGET_OS_IPHONE
++#error not ios
++#endif]],[[]])],[wine_cv_target_ios=yes],[wine_cv_target_ios=no])])
++    if test "x$wine_cv_target_ios" = xyes
++    then
++        enable_winemac_drv=${enable_winemac_drv:-no}
++        AC_SUBST(CORETEXT_LIBS,"-framework CoreText")
++        AC_SUBST(COREFOUNDATION_LIBS,"-framework CoreFoundation")
++        AC_SUBST(DISKARBITRATION_LIBS,"")
++        AC_SUBST(IOKIT_LIBS,"-framework CoreFoundation")
++        AC_SUBST(APPLICATIONSERVICES_LIBS,"")
++        AC_SUBST(CORESERVICES_LIBS,"")
++        AC_SUBST(APPKIT_LIBS,"")
++        AC_SUBST(SECURITY_LIBS,"-framework Security -framework CoreFoundation")
++        AC_SUBST(SYSTEMCONFIGURATION_LIBS,"")
++    else
+     enable_winemac_drv=${enable_winemac_drv:-yes}
+     dnl declare needed frameworks
+     AC_SUBST(CORETEXT_LIBS,"-framework CoreText")
+@@ -936,6 +960,7 @@ case $host_os in
+     AC_SUBST(APPKIT_LIBS,"-framework AppKit")
+     AC_SUBST(SECURITY_LIBS,"-framework Security -framework CoreFoundation")
+     AC_SUBST(SYSTEMCONFIGURATION_LIBS,"-framework SystemConfiguration")
++    fi
+ 
+     WINELOADER_LDFLAGS="-Wl,-segalign,0x1000,-pagezero_size,0x1000,-sectcreate,__TEXT,__info_plist,loader/wine_info.plist"
+ 
 diff --git a/dlls/ntdll/unix/cdrom.c b/dlls/ntdll/unix/cdrom.c
 index 08365087..fdd32e25 100644
 --- a/dlls/ntdll/unix/cdrom.c

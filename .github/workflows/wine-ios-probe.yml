@@ -25,14 +25,22 @@ jobs:
       - name: Apply fork patch series
         run: cd native/patches && ./apply.sh
 
-      - name: Install build deps (bison >= 3, LLVM PE toolchain)
+      - name: Install build deps (bison >= 3, LLVM PE toolchain, autoconf)
         run: |
           # aarch64 Wine requires PE cross-compilation (llvm-dlltool + lld-link);
           # Homebrew LLVM provides both — this is also how the arm64-windows PE
-          # DLLs get built, no llvm-mingw needed.
-          brew install bison llvm lld
+          # DLLs get built, no llvm-mingw needed. autoconf regenerates configure
+          # from the patched configure.ac (iOS framework detection, patch 0006).
+          brew install bison llvm lld autoconf
           echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
           echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+
+      - name: Regenerate configure from patched configure.ac
+        run: |
+          cd native/wine
+          autoconf --version | head -1
+          autoconf
+          echo "configure regenerated ($(wc -l < configure) lines)"
 
       - name: Build native Wine tools (for cross build)
         run: |
@@ -97,10 +105,10 @@ jobs:
           set -e
           echo "=== build-win32u.log (last 120 lines):"
           tail -120 build-win32u.log
-          if [ -f dlls/win32u/win32u.so ]; then
-            file dlls/win32u/win32u.so
-            file dlls/win32u/win32u.so | grep -q arm64 || exit 1
-          fi
+          # honest gate: the step passes ONLY if win32u.so exists as arm64 Mach-O
+          test -f dlls/win32u/win32u.so || { echo "::warning::win32u.so did not link"; exit 1; }
+          file dlls/win32u/win32u.so
+          file dlls/win32u/win32u.so | grep -q arm64 || exit 1
           exit $rc
 
       # Collect the iOS-native runtime artifacts that a bundle would ship.
