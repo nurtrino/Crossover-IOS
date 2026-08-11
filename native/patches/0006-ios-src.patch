@@ -402,6 +402,84 @@ index 982caf5b..d1f51bf4 100644
  #endif  /* __APPLE__ */
  
  
+diff --git a/dlls/ntdll/unix/signal_arm64.c b/dlls/ntdll/unix/signal_arm64.c
+index a08175d9..7c4a5d9e 100644
+--- a/dlls/ntdll/unix/signal_arm64.c
++++ b/dlls/ntdll/unix/signal_arm64.c
+@@ -26,6 +26,10 @@
+ 
+ #include "config.h"
+ 
++#ifdef __APPLE__
++# include <TargetConditionals.h>
++#endif
++
+ #include <assert.h>
+ #include <pthread.h>
+ #include <signal.h>
+@@ -697,6 +701,41 @@ NTSTATUS get_thread_wow64_context( HANDLE handle, void *ctx, ULONG size )
+ }
+ 
+ 
++/***********************************************************************
++ *           iOS x18/TEB signal-resume trampoline
++ *
++ * Crossover-IOS fork, patch 0006. The iOS kernel zeroes x18 on sigreturn
++ * (measured), so Wine cannot deliver the Windows TEB register to a user-mode
++ * entry point (KiUserExceptionDispatcher, the syscall-dispatcher return) via
++ * the signal context — the entry would run with x18 = 0 and fault reading the
++ * TEB, recursing until the stack overflows. Resume instead at this trampoline:
++ * the kernel *does* restore the ordinary GPRs, so setup stashes the TEB in x9
++ * and the real entry point in x10; the trampoline restores x18 and tail-calls.
++ * Both call sites target function entries, which do not expect x9/x10 to be
++ * preserved, so clobbering them is safe. No-op on macOS/Linux.
++ */
++#if defined(__APPLE__) && !TARGET_OS_OSX
++extern void __wine_ios_teb_trampoline(void);
++__ASM_GLOBAL_FUNC( __wine_ios_teb_trampoline,
++                   "mov x18, x9\n\t"   /* TEB, stashed by resume_with_teb */
++                   "br x10" )            /* real entry point */
++#endif
++
++/* Set the signal context to resume at PC with x18 = TEB, using the iOS
++ * trampoline where the kernel would otherwise drop x18. */
++static inline void resume_with_teb( ucontext_t *sigcontext, ULONG_PTR pc, ULONG_PTR teb )
++{
++#if defined(__APPLE__) && !TARGET_OS_OSX
++    REGn_sig( 9, sigcontext )  = teb;
++    REGn_sig( 10, sigcontext ) = pc;
++    PC_sig( sigcontext ) = (ULONG_PTR)__wine_ios_teb_trampoline;
++#else
++    PC_sig( sigcontext ) = pc;
++    REGn_sig( 18, sigcontext ) = teb;
++#endif
++}
++
++
+ /***********************************************************************
+  *           setup_raise_exception
+  */
+@@ -724,8 +763,7 @@ static void setup_raise_exception( ucontext_t *sigcontext, EXCEPTION_RECORD *rec
+     stack->pc = stack->context.Pc;
+ 
+     SP_sig(sigcontext) = (ULONG_PTR)stack;
+-    PC_sig(sigcontext) = (ULONG_PTR)pKiUserExceptionDispatcher;
+-    REGn_sig(18, sigcontext) = (ULONG_PTR)NtCurrentTeb();
++    resume_with_teb( sigcontext, (ULONG_PTR)pKiUserExceptionDispatcher, (ULONG_PTR)NtCurrentTeb() );
+ }
+ 
+ 
+@@ -1054,9 +1092,8 @@ static BOOL handle_syscall_fault( ucontext_t *context, EXCEPTION_RECORD *rec )
+     {
+         TRACE( "returning to user mode ip=%p ret=%08x\n", (void *)frame->pc, rec->ExceptionCode );
+         REGn_sig(0, context)  = rec->ExceptionCode;
+-        REGn_sig(18, context) = (ULONG_PTR)NtCurrentTeb();
+         SP_sig(context)       = (ULONG_PTR)frame;
+-        PC_sig(context)       = (ULONG_PTR)__wine_syscall_dispatcher_return;
++        resume_with_teb( context, (ULONG_PTR)__wine_syscall_dispatcher_return, (ULONG_PTR)NtCurrentTeb() );
+     }
+     return TRUE;
+ }
 diff --git a/dlls/ntdll/unix/system.c b/dlls/ntdll/unix/system.c
 index a7d927a4..0775ebe0 100644
 --- a/dlls/ntdll/unix/system.c
