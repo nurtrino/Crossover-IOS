@@ -23,7 +23,9 @@ case "${1:-}" in
     *) echo "usage: $0 [--check|--reverse]"; exit 2 ;;
 esac
 
-mapfile -t patches < <(grep -vE '^\s*(#|$)' "$series")
+# portable across bash 3.2 (macOS) — no mapfile, POSIX character class
+patches=()
+while IFS= read -r line; do patches+=("$line"); done < <(grep -vE '^[[:space:]]*(#|$)' "$series")
 [ "$mode" = reverse ] && { min=${#patches[@]}; for ((i=min-1;i>=0;i--)); do rev+=("${patches[i]}"); done; patches=("${rev[@]}"); }
 
 applied_for_check=()
