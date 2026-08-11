@@ -23,11 +23,11 @@
 # live ntdll PE side and an initialized prefix).
 #
 # Reported, NOT asserted: whether pseudo-processes get separate mappings of
-# their imported DLLs. They currently do not — two in-process Windows processes
-# share one kernel32 image and therefore its globals, where real processes get
-# private copy-on-write data. This is the known open risk in Blocker 1 and the
-# likely cause of stray ERROR_INVALID_HANDLE failures in children (e.g.
-# hostname.exe). The measurement is printed each run so a fix becomes visible.
+# their imported DLLs. With PE-format DLLs (mingw build) they DO — each
+# pseudo-process gets its own copy-on-write mapping of e.g. kernel32, so DLL
+# globals are isolated (the script prints "... distinct kernel32 mappings —
+# isolated"). This fixed hostname.exe's ERROR_INVALID_HANDLE. The measurement
+# is still printed each run so a regression becomes visible.
 set -u
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
