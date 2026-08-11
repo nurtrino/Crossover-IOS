@@ -442,10 +442,21 @@ index a7d927a4..0775ebe0 100644
  static NTSTATUS fill_battery_state( SYSTEM_BATTERY_STATE *bs )
  {
 diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
-index 69bc6d16..b6afbe1d 100644
+index 69bc6d16..c8909f33 100644
 --- a/dlls/ntdll/unix/virtual.c
 +++ b/dlls/ntdll/unix/virtual.c
-@@ -65,12 +65,52 @@
+@@ -24,6 +24,10 @@
+ 
+ #include "config.h"
+ 
++#ifdef __APPLE__
++# include <TargetConditionals.h>
++#endif
++
+ #include <assert.h>
+ #include <errno.h>
+ #include <fcntl.h>
+@@ -65,12 +69,52 @@
  #endif
  #if defined(__APPLE__)
  #define host_page_size mac_host_page_size
@@ -499,7 +510,7 @@ index 69bc6d16..b6afbe1d 100644
  #endif
  
  #if defined(HAVE_LINUX_USERFAULTFD_H) && defined(HAVE_LINUX_FS_H)
-@@ -202,7 +242,16 @@ static void *host_addr_space_limit;  /* top of the host virtual address space */
+@@ -202,7 +246,16 @@ static void *host_addr_space_limit;  /* top of the host virtual address space */
  static struct file_view *arm64ec_view;
  
  ULONG_PTR user_space_wow_limit = 0;
@@ -517,6 +528,23 @@ index 69bc6d16..b6afbe1d 100644
  
  /* TEB allocation blocks */
  static void *teb_block;
+@@ -4058,8 +4111,16 @@ TEB *virtual_alloc_first_teb(void)
+         exit(1);
+     }
+ 
++#if defined(__APPLE__) && !TARGET_OS_OSX
++    /* Crossover-IOS fork, patch 0006: the low 4GB is unmappable on iOS, so
++     * the 2GB zero_bits constraint (32-bit wow64 addressability) can never be
++     * satisfied — and iOS has no wow64. Let the TEB block live anywhere. */
++    NtAllocateVirtualMemory( NtCurrentProcess(), &teb_block, 0, &total,
++                             MEM_RESERVE | MEM_TOP_DOWN, PAGE_READWRITE );
++#else
+     NtAllocateVirtualMemory( NtCurrentProcess(), &teb_block, is_win64 ? limit_2g - 1 : 0, &total,
+                              MEM_RESERVE | MEM_TOP_DOWN, PAGE_READWRITE );
++#endif
+     teb_block_pos = 30;
+     ptr = (char *)teb_block + 30 * block_size;
+     data_size = 2 * block_size;
 diff --git a/dlls/ntoskrnl.exe/instr.c b/dlls/ntoskrnl.exe/instr.c
 index 03f48152..5e08ec5e 100644
 --- a/dlls/ntoskrnl.exe/instr.c
