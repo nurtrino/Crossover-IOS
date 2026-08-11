@@ -204,10 +204,18 @@ jobs:
           # linker-signed flag from the ad-hoc signature, and AMFI then rejects
           # them (-423, verified). The as-built linker signature is the one
           # the simulator accepts — same class as the hello binary above.
-          echo "=== creating the prefix (wineboot, +seh to expose the exception chain) ==="
-          xcrun simctl spawn "$UDID" /usr/bin/env WINEPREFIX="$WP" WINEDEBUG=+err,+seh \
-            "$BUILD/loader/wine" wineboot.exe --init >boot.log 2>&1 || true
-          tail -80 boot.log || true
+          # After the x18 trampoline fix the instant crash is gone but a guest
+          # may now HANG, so bound every spawn with a portable alarm (perl,
+          # always present on macOS). A timed-out run still uploads its log.
+          run_bounded() { # run_bounded <seconds> -- <cmd...>
+            local secs=$1; shift 2
+            perl -e 'alarm shift @ARGV; exec @ARGV' "$secs" "$@"
+            echo "(exit rc=$? after <=${secs}s)"
+          }
+          echo "=== creating the prefix (wineboot, +seh,+tid to expose progress) ==="
+          run_bounded 150 -- xcrun simctl spawn "$UDID" /usr/bin/env WINEPREFIX="$WP" \
+            WINEDEBUG=+err,+seh,+tid "$BUILD/loader/wine" wineboot.exe --init >boot.log 2>&1 || true
+          echo "--- boot.log (tail 150) ---"; tail -150 boot.log || true
           echo "=== symbolize the recurring PE-ntdll fault ==="
           # every run faults at the same spot; map it back to a source line.
           # ntdll.dll links at 0x180000000; the runtime base is in the +module
@@ -225,7 +233,7 @@ jobs:
             echo "no stack-overflow line or ntdll.dll missing; skipping symbolization"
           fi
           echo "=== running: cmd.exe /c echo (by name) ==="
-          xcrun simctl spawn "$UDID" /usr/bin/env WINEPREFIX="$WP" WINEDEBUG=+err \
+          run_bounded 120 -- xcrun simctl spawn "$UDID" /usr/bin/env WINEPREFIX="$WP" WINEDEBUG=+err,+seh \
             "$BUILD/loader/wine" cmd.exe /c "echo WINDOWS_RAN_IN_IOS_SIM_%PROCESSOR_ARCHITECTURE%" \
             >run.log 2>&1 || true
           echo "--- run.log (by name) ---"; cat run.log || true
@@ -233,7 +241,7 @@ jobs:
           CMDEXE=$(ls "$BUILD"/programs/cmd/*-windows/cmd.exe 2>/dev/null | head -1)
           echo "cmd.exe at: ${CMDEXE:-NOT FOUND}"
           if [ -n "$CMDEXE" ]; then
-            xcrun simctl spawn "$UDID" /usr/bin/env WINEPREFIX="$WP" WINEDEBUG=+err \
+            run_bounded 120 -- xcrun simctl spawn "$UDID" /usr/bin/env WINEPREFIX="$WP" WINEDEBUG=+err,+seh \
               "$BUILD/loader/wine" "$CMDEXE" /c "echo WINDOWS_RAN_IN_IOS_SIM_%PROCESSOR_ARCHITECTURE%" \
               >>run.log 2>&1 || true
           fi
