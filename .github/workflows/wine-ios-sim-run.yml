@@ -1,0 +1,133 @@
+name: Run Windows program in iOS Simulator
+
+# The one environment reachable from CI where Wine can actually EXECUTE a
+# Windows program in an iOS runtime: the iOS Simulator. It runs on the macOS
+# runner (so fork + JIT are permitted, unlike a locked-down device) and
+# `xcrun simctl spawn` runs a simulator-targeted binary inside it. The fork
+# patches guard on TARGET_OS_OSX, so the simulator (TARGET_OS_IPHONE=1,
+# TARGET_OS_OSX=0) builds the iOS code paths.
+#
+# This is a NORMAL Wine build (no WINE_FORKLESS) — the simulator allows Wine
+# to fork its own server, which is the simplest path to demonstrating
+# execution. Success = a console Windows program's output appears from inside
+# the simulator. Failure still pins the exact blocker (address-space
+# reservation, loader, server) with hard logs — the diagnostic the on-device
+# work needs. GUI is out of scope (no display driver); cmd.exe is console.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  sim-run:
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install deps
+        run: |
+          brew install bison llvm lld autoconf
+          echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+
+      - name: Apply patches + regenerate configure
+        run: |
+          cd native/patches && ./apply.sh
+          cd ../wine && autoconf
+
+      - name: Build native Wine tools
+        run: |
+          mkdir native-tools && cd native-tools
+          ../native/wine/configure --enable-win64 --without-x --without-freetype \
+            --disable-tests >cfg.log 2>&1 || { tail -30 cfg.log; exit 1; }
+          make -j3 __tooldeps__ >tools.log 2>&1 || { tail -40 tools.log; exit 1; }
+
+      - name: Configure Wine for the iOS Simulator (arm64)
+        run: |
+          SIMSDK=$(xcrun --sdk iphonesimulator --show-sdk-path)
+          echo "SIMSDK=$SIMSDK"
+          mkdir sim-build && cd sim-build
+          ../native/wine/configure \
+            --host=aarch64-apple-darwin --with-wine-tools=../native-tools \
+            --without-x --without-freetype --disable-tests \
+            CC="$(xcrun -f clang) -arch arm64 -isysroot $SIMSDK -mios-simulator-version-min=16.0" \
+            CXX="$(xcrun -f clang++) -arch arm64 -isysroot $SIMSDK -mios-simulator-version-min=16.0" \
+            >cfg.log 2>&1 || { tail -40 cfg.log; exit 1; }
+          echo "configured"
+
+      - name: Build Wine (loader + dlls + cmd.exe)
+        run: |
+          cd sim-build
+          set +e
+          make -j3 >build.log 2>&1
+          rc=$?
+          set -e
+          tail -30 build.log
+          # the pieces the run needs
+          for f in loader/wine dlls/ntdll/ntdll.so server/wineserver programs/cmd/x86_64-windows/cmd.exe; do
+            if [ -f "$f" ]; then echo "OK  $f ($(file -b "$f" | cut -c1-40))"; else echo "MISSING $f"; fi
+          done
+          test -f loader/wine && test -f dlls/ntdll/ntdll.so || { echo "::error::core build incomplete"; tail -80 build.log; exit 1; }
+          file loader/wine | grep -q arm64 || exit 1
+
+      - name: Boot an iOS Simulator
+        id: sim
+        run: |
+          # first available simulator UDID (the runner ships iOS runtimes)
+          UDID=$(xcrun simctl list devices available | awk -F '[()]' '/\([0-9A-F-]{36}\)/{print $2; exit}')
+          echo "picked udid: $UDID"
+          test -n "$UDID" || { echo "::error::no available simulator"; xcrun simctl list devices; exit 1; }
+          echo "udid=$UDID" >> "$GITHUB_OUTPUT"
+          xcrun simctl boot "$UDID" || true
+          xcrun simctl bootstatus "$UDID" -b || true
+          echo "booted"
+
+      - name: Run cmd.exe inside the simulator
+        id: run
+        continue-on-error: true
+        env:
+          UDID: ${{ steps.sim.outputs.udid }}
+        run: |
+          BUILD="$PWD/sim-build"
+          WP="$PWD/simprefix"
+          mkdir -p "$WP"
+          echo "=== creating the prefix (wineboot) ==="
+          xcrun simctl spawn "$UDID" /usr/bin/env WINEPREFIX="$WP" WINEDEBUG=+err \
+            "$BUILD/loader/wine" wineboot.exe --init >boot.log 2>&1 || true
+          tail -25 boot.log || true
+          echo "=== running: cmd.exe /c echo ==="
+          xcrun simctl spawn "$UDID" /usr/bin/env WINEPREFIX="$WP" WINEDEBUG=+err \
+            "$BUILD/loader/wine" cmd.exe /c "echo WINDOWS_RAN_IN_IOS_SIM_%PROCESSOR_ARCHITECTURE%" \
+            >run.log 2>&1 || true
+          echo "--- run.log ---"; cat run.log || true
+          if grep -q "WINDOWS_RAN_IN_IOS_SIM" run.log; then
+            echo "::notice::A Windows console program EXECUTED inside the iOS Simulator"
+            echo "ran=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::cmd.exe did not produce output — see logs for the blocker"
+            echo "ran=no" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-sim-run-logs
+          path: |
+            sim-build/build.log
+            sim-build/cfg.log
+            boot.log
+            run.log
+          if-no-files-found: ignore
+
+      - name: Verdict
+        run: |
+          echo "ran=${{ steps.run.outputs.ran }}"
+          if [ "${{ steps.run.outputs.ran }}" = "yes" ]; then
+            echo "Windows software executed in the iOS Simulator runtime."
+          else
+            echo "Did not execute — logs pin the blocker (address reservation / loader / server)."
+            exit 1
+          fi
