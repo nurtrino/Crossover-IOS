@@ -1,5 +1,15 @@
 # Handoff — finishing M1 (in-process `CreateProcess`)
 
+> **SUPERSEDED (2026-08-11).** The blocker described here is fixed and the M1
+> gate passes (wired into `make test-real`). The `load_dll` fault below turned
+> out to be `find_existing_module` reading a NULL `IMAGE_NT_HEADERS` — root
+> causes were the host-global handle→fd cache, relocation to an occupied
+> dynamic base, and win32u's host-global user-session init (0003i + patch
+> 0004), NOT the 0003g loader block suspected in §2. See
+> `docs/DESIGN-0003-inproc-spawn.md` "Status: 0003i landed" and
+> `docs/ROADMAP.md`. Kept for the rebuild recipe (§3) and traps (§7), which
+> remain accurate.
+
 Written at the end of the session that landed patch-series stages **0003e–0003h**.
 Branch `claude/codebase-familiarization-gnyptk`, HEAD **`7cb145d`**, tree clean,
 suite green (5/5).

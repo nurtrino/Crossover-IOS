@@ -101,19 +101,26 @@ Every phase ends with something demonstrable.
     the likely cause of `hostname.exe`'s ERROR_INVALID_HANDLE; and a crashing
     child still takes the host down, so the backend stays opt-in. The fix is a
     private per-process image mapping per DLL (mechanic proven by `peload_test`)
-- [ ] M1 complete: `wine notepad.exe` with all fork/exec compiled out,
-      single host process — gate script `native/wineforge/m1_notepad_test.sh`
-      (currently FAILING; not wired into the suite). Status: the build now has
-      `winex11.drv`, and notepad runs headless under Xvfb on the fork backend;
-      as the primary process with the in-process backend on it runs and stays up
-      (verified by hand, 20s, no errors); it only exits early when explorer's
-      desktop path spawns it as an in-process **child**. So the gap is a GUI
-      child launched through explorer, not notepad itself — suspected to be the
-      same shared-DLL-globals class as `hostname.exe`. **DLL isolation is now solved**: building with mingw
-      produces 602 real PE DLLs and two pseudo-processes map two distinct
-      kernel32 images, which also fixed `hostname.exe`. Still open: a GUI child
-      spawned through explorer exits early, and there is no per-pseudo-process
-      fault containment
+- [x] **M1 complete: `wine notepad.exe` with Windows child processes as
+      threads, not processes** — gate script
+      `native/wineforge/m1_notepad_test.sh`, PASSING and wired into
+      `make test-real`: cold boot on the in-process backend runs notepad and
+      explorer's desktop as thread groups inside one host (5 host processes
+      under fork → 3, the rest being the deliberate bootstrap-boundary
+      forks), notepad verified alive on both backends. The last blocker — a
+      GUI child spawned through explorer dying in `load_dll` — was three
+      stacked shared-state bugs, fixed in 0003i + patch 0004: the
+      handle→unix-fd cache was host-global while handle values are
+      per-process (the crash); images were relocated to the server-assigned
+      dynamic base even when a sibling occupied it (silent global aliasing);
+      and win32u's user-session init ran once per host so later
+      pseudo-processes never connected to a winstation/desktop (the explorer
+      respawn loop). Full story in `docs/DESIGN-0003-inproc-spawn.md`
+      "0003i landed". Still open, tracked there: per-pseudo-process fault
+      containment (backend stays opt-in), resource reclamation at
+      pseudo-process exit, and the audit list of remaining shared PE-side
+      globals; "all fork/exec compiled out" awaits the iOS prepared-prefix
+      model (bootstrap deliberately falls back to fork)
 
 ## Phase 3 — iOS bring-up (WS-C) → M2
 - [ ] Cross-build the fork against the iOS SDK (winelib static libs + dylibs)
