@@ -50,6 +50,38 @@ byte-clean with the full series applied.
 These cannot be done in a Linux CI container. They need a Mac with Xcode and
 a development-mode iPad (or the iOS Simulator for the non-JIT parts).
 
+### 2·0 The app→Wine bootstrap and the address-space blocker (traced)
+
+The app-side entry is small and well understood — `loader/main.c` is the
+reference and it is ~30 lines of real logic:
+
+1. `init_reserved_areas()` — reserve the Windows address ranges,
+2. `dlopen("ntdll.so")`,
+3. `dlsym(handle, "__wine_main")` and call `__wine_main(argc, argv)`
+   (`__wine_main` is `DECLSPEC_EXPORT` from `dlls/ntdll/unix/loader.c`, so no
+   separate loader binary is needed — the embedded `ntdll.so` exposes it).
+
+For the iOS app this becomes: start the embedded `wineserver` on a thread
+(the `wineserver_run()` entry from patch 0001, as the wineforge harness does
+in `embed_test.c`/`real_client_test.c`), set `WINE_EMBEDDED_SERVER`, point
+`WINEPREFIX` at `WineRuntime/prefix` and the DLL search path at
+`WineRuntime/{lib,pe}`, then `dlopen` + `__wine_main` with argv for a console
+guest. A GUI guest additionally needs 2a; a **console** guest does not.
+
+**Why this is not wired blind now — the real blocker underneath it.** On
+arm64, `loader/main.c` leaves `wine_main_preload_info = NULL` and
+`init_reserved_areas()` empty; the Windows address space (ntdll's `virtual.c`
+reserves ranges like `0x1000–0x200000000`, the low 8 GB) is claimed via
+`mmap(MAP_FIXED, PROT_NONE)` from inside ntdll. iOS's mmap is heavily
+restricted and the app + dyld shared cache already occupy parts of the
+address space, so whether those reservations succeed **must be determined on
+a device** — it is the classic iOS Wine porting problem (NATIVE_PORT
+Blocker 2). Writing the bootstrap harness before that reservation is made to
+work on-device would produce code that cannot boot and cannot be verified
+here; it is the first thing to build **on the device**, where each mmap
+result is observable. That is why `NativeWineEngine.start()` fails with a
+clear reason today instead of shipping an unverified boot path.
+
 ### 2a. A UIKit/Metal display driver — the piece that puts a window on screen
 
 The probe **disables the AppKit-based `winemac.drv`** (patch 0006's
