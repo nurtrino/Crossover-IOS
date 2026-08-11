@@ -402,6 +402,132 @@ index 982caf5b..d1f51bf4 100644
  #endif  /* __APPLE__ */
  
  
+diff --git a/dlls/ntdll/unix/signal_arm64.c b/dlls/ntdll/unix/signal_arm64.c
+index a08175d9..64029587 100644
+--- a/dlls/ntdll/unix/signal_arm64.c
++++ b/dlls/ntdll/unix/signal_arm64.c
+@@ -26,6 +26,10 @@
+ 
+ #include "config.h"
+ 
++#ifdef __APPLE__
++# include <TargetConditionals.h>
++#endif
++
+ #include <assert.h>
+ #include <pthread.h>
+ #include <signal.h>
+@@ -1062,6 +1066,30 @@ static BOOL handle_syscall_fault( ucontext_t *context, EXCEPTION_RECORD *rec )
+ }
+ 
+ 
++/***********************************************************************
++ *           init_handler
++ *
++ * Crossover-IOS fork, patch 0006: on ARM64 the TEB is read from x18
++ * (NtCurrentTeb), but Apple reserves x18 and the iOS kernel does not preserve
++ * its value across signal delivery — the handler would then read a garbage
++ * TEB, hand it to the exception dispatcher, and the guest re-faults forever
++ * (observed as a stack overflow during ntdll init in the iOS Simulator). The
++ * kernel *does* save the interrupted thread's x18 in the sigcontext, and the
++ * faulting Windows/unix code always runs with x18 = TEB, so re-establish the
++ * live x18 from the saved context at handler entry. macOS preserves x18, so
++ * this is a no-op there and on Linux.
++ */
++static inline void init_handler( void *sigcontext )
++{
++#if defined(__APPLE__) && !TARGET_OS_OSX
++    const ucontext_t *ctx = sigcontext;
++    __wine_current_teb = (struct _TEB *)REGn_sig( 18, ctx );
++#else
++    (void)sigcontext;
++#endif
++}
++
++
+ /**********************************************************************
+  *		segv_handler
+  *
+@@ -1069,6 +1097,7 @@ static BOOL handle_syscall_fault( ucontext_t *context, EXCEPTION_RECORD *rec )
+  */
+ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+ {
++    init_handler( sigcontext );
+     EXCEPTION_RECORD rec = { 0 };
+     ucontext_t *context = sigcontext;
+     DWORD64 esr = get_fault_esr( context );
+@@ -1091,6 +1120,7 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+  */
+ static void ill_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+ {
++    init_handler( sigcontext );
+     EXCEPTION_RECORD rec = { EXCEPTION_ILLEGAL_INSTRUCTION };
+     ucontext_t *context = sigcontext;
+ 
+@@ -1119,6 +1149,7 @@ static void ill_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+  */
+ static void bus_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+ {
++    init_handler( sigcontext );
+     EXCEPTION_RECORD rec = { EXCEPTION_DATATYPE_MISALIGNMENT };
+ 
+     setup_exception( sigcontext, &rec );
+@@ -1132,6 +1163,7 @@ static void bus_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+  */
+ static void trap_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+ {
++    init_handler( sigcontext );
+     EXCEPTION_RECORD rec = { 0 };
+     ucontext_t *context = sigcontext;
+     CONTEXT ctx;
+@@ -1191,6 +1223,7 @@ static void trap_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+  */
+ static void fpe_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+ {
++    init_handler( sigcontext );
+     EXCEPTION_RECORD rec = { 0 };
+ 
+     switch (siginfo->si_code & 0xffff )
+@@ -1248,6 +1281,7 @@ static void fpe_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+  */
+ static void int_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+ {
++    init_handler( sigcontext );
+     HANDLE handle;
+ 
+     if (!p__wine_ctrl_routine) return;
+@@ -1264,6 +1298,7 @@ static void int_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+  */
+ static void abrt_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+ {
++    init_handler( sigcontext );
+     EXCEPTION_RECORD rec = { EXCEPTION_WINE_ASSERTION, EXCEPTION_NONCONTINUABLE };
+ 
+     setup_exception( sigcontext, &rec );
+@@ -1277,6 +1312,7 @@ static void abrt_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+  */
+ static void quit_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+ {
++    init_handler( sigcontext );
+     ucontext_t *context = sigcontext;
+ 
+     if (!is_inside_syscall( SP_sig(context) )) user_mode_abort_thread( 0, get_syscall_frame() );
+@@ -1291,6 +1327,7 @@ static void quit_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+  */
+ static void usr1_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+ {
++    init_handler( sigcontext );
+     ucontext_t *ucontext = sigcontext;
+     CONTEXT context;
+ 
+@@ -1318,6 +1355,7 @@ static void usr1_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+  */
+ static void usr2_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+ {
++    init_handler( sigcontext );
+     struct syscall_frame *frame = get_syscall_frame();
+     ucontext_t *context = sigcontext;
+     DWORD i;
 diff --git a/dlls/ntdll/unix/system.c b/dlls/ntdll/unix/system.c
 index a7d927a4..0775ebe0 100644
 --- a/dlls/ntdll/unix/system.c
