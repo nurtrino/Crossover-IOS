@@ -1,0 +1,101 @@
+name: Probe x18 behavior across signals (iOS Simulator)
+
+# Measures, rather than guesses, the platform behavior behind the guest-init
+# crash: on ARM64 the Windows TEB lives in x18, which Apple reserves. Wine's
+# signal path sets the resumed x18 via the sigcontext and returns; if the iOS
+# kernel does not honor that on sigreturn, the guest resumes with a bad TEB and
+# faults forever (the stack overflow we see). This probe replicates exactly
+# that maneuver — handler sets sigcontext x18 + redirects PC to a capture stub —
+# and reports what x18 actually holds at the resume point. arm64 (not arm64e)
+# simulator binaries have no PAC, so redirecting PC is safe.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - name: Write the probe
+        run: |
+          cat > probe.c <<'EOF'
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <signal.h>
+          #include <stdint.h>
+          #include <sys/ucontext.h>
+
+          #define LIVE    0x1111222233334444ULL   /* x18 set before raise */
+          #define HANDLER 0xAAAABBBBCCCCDDDDULL   /* x18 the handler writes to sigcontext */
+
+          extern void capture_stub(void);
+          volatile uint64_t g_x18;
+
+          __attribute__((used, noreturn))
+          void report(void)
+          {
+              printf("PROBE x18_at_resume=0x%llx\n", (unsigned long long)g_x18);
+              if (g_x18 == HANDLER)
+                  printf("RESULT=sigreturn_honors_sigcontext_x18\n");     /* Wine's approach works; bug elsewhere */
+              else if (g_x18 == LIVE)
+                  printf("RESULT=sigreturn_keeps_live_x18_ignores_sigcontext\n"); /* need to set x18 another way */
+              else
+                  printf("RESULT=x18_wiped_to_0x%llx\n", (unsigned long long)g_x18);
+              fflush(stdout);
+              _exit(0);
+          }
+
+          /* On sigreturn the kernel resumes here. Save the live x18, then report. */
+          __asm__(
+          ".globl _capture_stub\n"
+          "_capture_stub:\n"
+          "  adrp x9, _g_x18@PAGE\n"
+          "  add  x9, x9, _g_x18@PAGEOFF\n"
+          "  str  x18, [x9]\n"
+          "  b    _report\n");
+
+          static void handler(int sig, siginfo_t *si, void *ctx)
+          {
+              ucontext_t *uc = (ucontext_t *)ctx;
+              uc->uc_mcontext->__ss.__x[18] = HANDLER;
+              uc->uc_mcontext->__ss.__pc    = (uint64_t)&capture_stub;
+          }
+
+          int main(void)
+          {
+              struct sigaction sa;
+              memset(&sa, 0, sizeof sa);
+              sa.sa_sigaction = handler;
+              sa.sa_flags = SA_SIGINFO;
+              sigaction(SIGUSR1, &sa, NULL);
+
+              register uint64_t x18v __asm__("x18");
+              x18v = LIVE;
+              __asm__ volatile("" : "+r"(x18v));   /* materialize the live x18 */
+
+              printf("PROBE_START live_x18=0x%llx\n", (unsigned long long)LIVE);
+              fflush(stdout);
+              raise(SIGUSR1);
+              printf("UNREACHABLE (stub did not run)\n");
+              return 1;
+          }
+          EOF
+
+      - name: Build for the iOS Simulator (arm64, no PAC)
+        run: |
+          SIMSDK=$(xcrun --sdk iphonesimulator --show-sdk-path)
+          xcrun clang -arch arm64 -isysroot "$SIMSDK" -mios-simulator-version-min=16.0 \
+            -O0 -o probe probe.c
+          file probe
+
+      - name: Boot a simulator and run the probe
+        run: |
+          UDID=$(xcrun simctl list devices available | awk -F '[()]' '/\([0-9A-F-]{36}\)/{print $2; exit}')
+          test -n "$UDID" || { echo "::error::no simulator"; exit 1; }
+          xcrun simctl boot "$UDID" || true
+          xcrun simctl bootstatus "$UDID" -b || true
+          echo "=== probe output ==="
+          xcrun simctl spawn "$UDID" "$PWD/probe" 2>&1 | tee out.txt
+          echo "=== verdict ==="
+          grep "RESULT=" out.txt || echo "no result line (probe crashed — itself informative)"
