@@ -128,13 +128,15 @@ else
 fi
 
 echo "cold prefix creation works with the in-process backend enabled"
-cold="$prefix-cold"; rm -rf "$cold"
-WINE_INPROC_SPAWN=1 WINE_INPROC_RUN=1 WINEPREFIX="$cold" WINEDEBUG=-all timeout 240 \
-    "$wine" wineboot.exe >/dev/null 2>&1
+cold="$prefix-cold"; coldlog="$prefix-cold.log"; rm -rf "$cold"
+WINE_INPROC_SPAWN=1 WINE_INPROC_RUN=1 WINEPREFIX="$cold" WINEDEBUG=err+all,warn+process timeout 240 \
+    "$wine" wineboot.exe >"$coldlog" 2>&1
 coldrc=$?
 have_k32=0; [ -e "$cold/drive_c/windows/system32/kernel32.dll" ] && have_k32=1
 WINEPREFIX="$cold" "$wineserver" -k 2>/dev/null; rm -rf "$cold"
-[ "$coldrc" = 0 ] || fail "cold-prefix wineboot returned $coldrc with the in-process backend on"
+[ "$coldrc" = 0 ] || { echo "--- cold wineboot log (last 40 lines):"; tail -40 "$coldlog"; rm -f "$coldlog"; \
+                       fail "cold-prefix wineboot returned $coldrc with the in-process backend on"; }
+rm -f "$coldlog"
 [ "$have_k32" = 1 ] || fail "cold prefix was not populated"
 echo "  ok: prefix built from cold, rc=$coldrc"
 

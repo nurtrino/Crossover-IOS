@@ -5,7 +5,10 @@ options:
     iOS: "17.0"
 settings:
   base:
-    SWIFT_VERSION: "5.10"
+    # Swift *language mode* (valid Xcode values: 4.0, 4.2, 5.0, 6.0) — not the
+    # toolchain version. The sources use Swift 5.9/5.10 features (switch
+    # expressions, #Preview), which any Xcode 15+ toolchain provides in 5.0 mode.
+    SWIFT_VERSION: "5.0"
     TARGETED_DEVICE_FAMILY: "1,2"
 targets:
   CrossoverPad:
@@ -32,3 +35,11 @@ targets:
     sources: [Tests]
     dependencies:
       - target: CrossoverPad
+
+schemes:
+  CrossoverPad:
+    build:
+      targets:
+        CrossoverPad: all
+    test:
+      targets: [CrossoverPadTests]

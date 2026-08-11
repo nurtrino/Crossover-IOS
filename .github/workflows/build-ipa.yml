@@ -1,0 +1,139 @@
+name: Build unsigned IPA
+
+# Builds CrossoverPad for iOS with code signing disabled, packages it as an
+# unsigned .ipa, and publishes it as a GitHub release with a direct download
+# link in the release notes. Sideload with your own signer (AltStore,
+# Sideloadly, TrollStore, or `ldid`/Xcode on a dev-mode device).
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (empty = auto ipa-rN tag)"
+        required: false
+        default: ""
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build-ipa:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: CrossoverPad
+        run: xcodegen generate
+
+      - name: Build (Release, unsigned, device slice)
+        working-directory: CrossoverPad
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project CrossoverPad.xcodeproj \
+            -scheme CrossoverPad \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CONFIGURATION_BUILD_DIR="$PWD/build" \
+            build | tail -40
+
+      - name: Verify build output
+        working-directory: CrossoverPad
+        run: |
+          test -d build/CrossoverPad.app || { echo "::error::CrossoverPad.app missing"; exit 1; }
+          # the binary must be an arm64 iOS Mach-O
+          file build/CrossoverPad.app/CrossoverPad
+          lipo -archs build/CrossoverPad.app/CrossoverPad | grep -q arm64
+          plutil -p build/CrossoverPad.app/Info.plist | head -20
+
+      - name: Package IPA
+        working-directory: CrossoverPad
+        run: |
+          rm -rf Payload && mkdir Payload
+          cp -R build/CrossoverPad.app Payload/
+          zip -qry CrossoverPad-unsigned.ipa Payload
+          unzip -l CrossoverPad-unsigned.ipa | head -10
+
+      - name: Upload artifact (every run)
+        uses: actions/upload-artifact@v4
+        with:
+          name: CrossoverPad-unsigned.ipa
+          path: CrossoverPad/CrossoverPad-unsigned.ipa
+          if-no-files-found: error
+
+      - name: Determine release tag
+        id: tag
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          elif [ -n "${{ github.event.inputs.tag }}" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=ipa-r${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create release with direct download link
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/CrossoverPad-unsigned.ipa"
+          cat > notes.md <<EOF
+          # CrossoverPad — unsigned IPA
+
+          **Direct download:** ${URL}
+
+          Unsigned build for iPad testing (arm64, iOS 17+). Sign and sideload
+          with AltStore, Sideloadly, TrollStore, or Xcode on a
+          developer-mode device.
+
+          What this build contains:
+          - The CrossoverPad bottle-manager app (SwiftUI) — create, persist,
+            and manage bottles; engine tier surfaced honestly in the UI.
+          - Engine: **mock** — the in-process Wine engine (Phase 3 / M2,
+            \`docs/ROADMAP.md\`) is not yet cross-built for iOS. Phase 2
+            (Wine's multi-process model collapsed into one host process) is
+            complete and gated on Linux: \`native/wineforge/m1_notepad_test.sh\`.
+
+          Built by workflow run ${{ github.run_id }} from ${{ github.sha }}.
+          EOF
+          gh release create "$TAG" \
+            "CrossoverPad/CrossoverPad-unsigned.ipa" \
+            --title "CrossoverPad unsigned IPA (${TAG})" \
+            --notes-file notes.md \
+            --prerelease \
+            --target "${{ github.sha }}"
+          echo "Release: https://github.com/${{ github.repository }}/releases/tag/${TAG}"
+
+  # Unit tests on the iOS simulator. Separate job so simulator flakiness never
+  # blocks the IPA, while still reporting its own pass/fail status.
+  simulator-tests:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate Xcode project
+        working-directory: CrossoverPad
+        run: xcodegen generate
+      - name: Run tests
+        working-directory: CrossoverPad
+        run: |
+          set -o pipefail
+          DEST=$(xcrun simctl list devices available | awk -F '[()]' '/iPhone/ {print $2; exit}')
+          echo "Using simulator udid: $DEST"
+          xcodebuild \
+            -project CrossoverPad.xcodeproj \
+            -scheme CrossoverPad \
+            -destination "id=$DEST" \
+            CODE_SIGNING_ALLOWED=NO \
+            test | tail -60
