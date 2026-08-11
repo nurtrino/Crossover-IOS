@@ -403,7 +403,7 @@ index 982caf5b..d1f51bf4 100644
  
  
 diff --git a/dlls/ntdll/unix/signal_arm64.c b/dlls/ntdll/unix/signal_arm64.c
-index a08175d9..0f3fef0d 100644
+index a08175d9..3166abd1 100644
 --- a/dlls/ntdll/unix/signal_arm64.c
 +++ b/dlls/ntdll/unix/signal_arm64.c
 @@ -26,6 +26,10 @@
@@ -417,7 +417,7 @@ index a08175d9..0f3fef0d 100644
  #include <assert.h>
  #include <pthread.h>
  #include <signal.h>
-@@ -697,6 +701,51 @@ NTSTATUS get_thread_wow64_context( HANDLE handle, void *ctx, ULONG size )
+@@ -272,6 +276,51 @@ static void restore_fpu( const CONTEXT *context, ucontext_t *sigcontext )
  }
  
  
@@ -467,9 +467,31 @@ index a08175d9..0f3fef0d 100644
 +
 +
  /***********************************************************************
-  *           setup_raise_exception
-  */
-@@ -724,8 +773,7 @@ static void setup_raise_exception( ucontext_t *sigcontext, EXCEPTION_RECORD *rec
+  *           save_context
+  *
+@@ -288,6 +337,9 @@ static void save_context( CONTEXT *context, const ucontext_t *sigcontext )
+     context->Pc   = PC_sig(sigcontext);     /* Program Counter */
+     context->Cpsr = PSTATE_sig(sigcontext); /* Current State Register */
+     for (i = 0; i <= 28; i++) context->X[i] = REGn_sig( i, sigcontext );
++#if defined(__APPLE__) && !TARGET_OS_OSX
++    context->X[18] = (DWORD64)(ULONG_PTR)NtCurrentTeb();  /* kernel zeroed x18 on entry */
++#endif
+     save_fpu( context, sigcontext );
+ }
+ 
+@@ -308,6 +360,11 @@ static void restore_context( const CONTEXT *context, ucontext_t *sigcontext )
+     PSTATE_sig(sigcontext) = context->Cpsr; /* Current State Register */
+     for (i = 0; i <= 28; i++) REGn_sig( i, sigcontext ) = context->X[i];
+     restore_fpu( context, sigcontext );
++#if defined(__APPLE__) && !TARGET_OS_OSX
++    /* the kernel drops x18 on sigreturn regardless of the sigcontext, so every
++     * resume must reload the TEB register via the trampoline */
++    resume_with_teb( sigcontext, context->Pc, (ULONG_PTR)NtCurrentTeb() );
++#endif
+ }
+ 
+ 
+@@ -724,8 +781,7 @@ static void setup_raise_exception( ucontext_t *sigcontext, EXCEPTION_RECORD *rec
      stack->pc = stack->context.Pc;
  
      SP_sig(sigcontext) = (ULONG_PTR)stack;
@@ -479,7 +501,7 @@ index a08175d9..0f3fef0d 100644
  }
  
  
-@@ -1054,9 +1102,8 @@ static BOOL handle_syscall_fault( ucontext_t *context, EXCEPTION_RECORD *rec )
+@@ -1054,9 +1110,8 @@ static BOOL handle_syscall_fault( ucontext_t *context, EXCEPTION_RECORD *rec )
      {
          TRACE( "returning to user mode ip=%p ret=%08x\n", (void *)frame->pc, rec->ExceptionCode );
          REGn_sig(0, context)  = rec->ExceptionCode;
@@ -490,7 +512,7 @@ index a08175d9..0f3fef0d 100644
      }
      return TRUE;
  }
-@@ -1078,7 +1125,15 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+@@ -1078,7 +1133,15 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
      else if (esr & 0x40) rec.ExceptionInformation[0] = EXCEPTION_WRITE_FAULT;
      else rec.ExceptionInformation[0] = EXCEPTION_READ_FAULT;
      rec.ExceptionInformation[1] = (ULONG_PTR)siginfo->si_addr;
