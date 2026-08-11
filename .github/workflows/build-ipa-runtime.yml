@@ -56,14 +56,15 @@ jobs:
           ls -la native/ios/build/
       - name: Stage runtime bits
         run: |
-          mkdir -p stage/pe stage/prefix
+          mkdir -p stage/pe
           # OS-independent PE DLLs (x86_64-windows) — the guest binaries
           find native/wine-build/dlls -path '*/x86_64-windows/*.dll' -exec cp {} stage/pe/ \;
           echo "staged $(ls stage/pe | wc -l) PE DLLs"
-          # prepared prefix
-          tar -C stage/prefix -xzf native/ios/build/prefix-bundle.tar.gz
+          # ship the prepared prefix AS THE TARBALL: tar preserves the internal
+          # symlinks (c: -> ../drive_c) without upload-artifact following them
+          cp native/ios/build/prefix-bundle.tar.gz stage/
           cp native/ios/build/prefix-bundle.manifest stage/ || true
-          du -sh stage/pe stage/prefix
+          du -sh stage/pe stage/prefix-bundle.tar.gz
       - uses: actions/upload-artifact@v4
         with:
           name: linux-runtime-bits
@@ -127,7 +128,9 @@ jobs:
           rm -rf "$RT"; mkdir -p "$RT/lib" "$RT/pe" "$RT/prefix"
           cp ios-build/dlls/ntdll/ntdll.so ios-build/dlls/win32u/win32u.so ios-build/server/wineserver "$RT/lib/"
           cp -R linux-bits/pe/. "$RT/pe/"
-          cp -R linux-bits/prefix/prefix/. "$RT/prefix/" 2>/dev/null || cp -R linux-bits/prefix/. "$RT/prefix/"
+          # extract the prefix tarball (tar recreates the internal symlinks; the
+          # host-absolute ones were already pruned when the bundle was built)
+          tar -C "$RT/prefix" --strip-components=1 -xzf linux-bits/prefix-bundle.tar.gz
           {
             echo "# WineRuntime bundle assembled $(date -u +%Y-%m-%dT%H:%M:%SZ)"
             echo "libs:    $(ls "$RT/lib" | tr '\n' ' ')"

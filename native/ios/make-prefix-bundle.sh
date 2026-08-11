@@ -49,6 +49,19 @@ WINEPREFIX="$prefix" WINEDEBUG=-all WINEDLLOVERRIDES="mscoree,mshtml=" \
 WINEPREFIX="$prefix" "$wineserver" -w 2>/dev/null || true
 
 echo "==> pruning"
+# Absolute dosdevices symlinks (notably z: -> /) point into the BUILD host's
+# filesystem — they are meaningless on the target and dangerous to ship: any
+# tool that follows them (artifact upload, xcodebuild's bundle copy) would try
+# to walk the entire host root. The iOS app reconfigures its drive mappings
+# for its sandbox at first launch, so drop every absolute-target symlink here.
+if [ -d "$prefix/dosdevices" ]; then
+    for link in "$prefix/dosdevices"/*; do
+        [ -L "$link" ] || continue
+        case "$(readlink "$link")" in
+            /*) rm -f "$link" ;;   # absolute target -> host-specific, drop it
+        esac
+    done
+fi
 # caches and logs that a fresh install never needs
 rm -rf "$prefix/drive_c/users/"*/Temp/* 2>/dev/null || true
 rm -f  "$prefix/.update-timestamp.bak" 2>/dev/null || true
