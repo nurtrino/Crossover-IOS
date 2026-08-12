@@ -721,7 +721,7 @@ index a7d927a4..0775ebe0 100644
  static NTSTATUS fill_battery_state( SYSTEM_BATTERY_STATE *bs )
  {
 diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
-index 69bc6d16..440d52fb 100644
+index 69bc6d16..028c5f79 100644
 --- a/dlls/ntdll/unix/virtual.c
 +++ b/dlls/ntdll/unix/virtual.c
 @@ -24,6 +24,10 @@
@@ -832,15 +832,27 @@ index 69bc6d16..440d52fb 100644
          {
              ERR( "mmap() error %s, range %p-%p, unix_prot %#x.\n",
                   strerror(errno), start, (char *)start + size, unix_prot );
-@@ -3488,6 +3557,7 @@ static unsigned int virtual_map_section( HANDLE handle, PVOID *addr_ptr, ULONG_P
+@@ -3488,6 +3557,19 @@ static unsigned int virtual_map_section( HANDLE handle, PVOID *addr_ptr, ULONG_P
      LARGE_INTEGER offset;
      sigset_t sigset;
  
-+    ERR( "XDIAG virtual_map_section entered with protect=%x alloc_type=%x\n", protect, alloc_type );
++    {
++        SYSTEM_SERVICE_TABLE *t = KeServiceDescriptorTable;
++        struct syscall_frame *f = get_syscall_frame();
++        ULONG64 gsp = f ? *(volatile ULONG64 *)((char *)f + 0xf8) : 0;  /* frame->sp */
++        ULONG64 *ga = (ULONG64 *)gsp;
++        ERR( "XDIAG virtual_map_section protect=%x alloc_type=%x ArgTab[0x28]=%u guest_sp=%llx slot0=%llx slot1=%llx slot2=%llx\n",
++             protect, alloc_type,
++             t && t[0].ArgumentTable ? t[0].ArgumentTable[0x28] : 0xffff,
++             (unsigned long long)gsp,
++             (unsigned long long)(ga ? ga[0] : 0),
++             (unsigned long long)(ga ? ga[1] : 0),
++             (unsigned long long)(ga ? ga[2] : 0) );
++    }
      switch(protect)
      {
      case PAGE_NOACCESS:
-@@ -4058,8 +4128,16 @@ TEB *virtual_alloc_first_teb(void)
+@@ -4058,8 +4140,16 @@ TEB *virtual_alloc_first_teb(void)
          exit(1);
      }
  
