@@ -703,7 +703,7 @@ index a7d927a4..0775ebe0 100644
  static NTSTATUS fill_battery_state( SYSTEM_BATTERY_STATE *bs )
  {
 diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
-index 69bc6d16..1c119ac2 100644
+index 69bc6d16..949b3aea 100644
 --- a/dlls/ntdll/unix/virtual.c
 +++ b/dlls/ntdll/unix/virtual.c
 @@ -24,6 +24,10 @@
@@ -789,31 +789,32 @@ index 69bc6d16..1c119ac2 100644
  
  /* TEB allocation blocks */
  static void *teb_block;
-@@ -753,6 +806,23 @@ static void mmap_init( const struct preload_info *preload_info )
-     reserve_area( (void *)0x00007f000000, (void *)0x00007fff0000 );
-     reserve_area( (void *)0x7ffffe000000, (void *)0x7fffffff0000 );
- 
+@@ -1539,7 +1592,23 @@ static void* try_map_free_area( void *base, void *end, ptrdiff_t step,
+     {
+         if (anon_mmap_tryfixed( start, size, unix_prot, 0 ) != MAP_FAILED) return start;
+         TRACE( "Found free area is already mapped, start %p.\n", start );
+-        if (errno != EEXIST)
++        if (errno != EEXIST
 +#if defined(__APPLE__) && !TARGET_OS_OSX
-+    /* Crossover-IOS fork, patch 0006: the arm64 iOS kernel mandates a 4GB
-+     * __PAGEZERO, which swallows the entire low Windows address space where the
-+     * reserves above would normally take effect (they find no holes under the
-+     * pagezero and reserve nothing). dyld then places the main binary and its
-+     * dylibs just above the pagezero at nondeterministic (ASLR) addresses, so a
-+     * PE module that falls through to map_free_area() can collide with them and
-+     * abort the whole load: anon_mmap_tryfixed() maps the mach_vm_map failure to
-+     * ENOMEM (not the KERN_NO_SPACE->EEXIST that would let try_map_free_area()
-+     * step past), and try_map_free_area() treats any non-EEXIST error as fatal.
-+     * Reserve the high band the PE loader actually uses on this platform (ntdll
-+     * relocates to ~0x6fffff000000) so PE modules are placed from
-+     * map_reserved_area()'s known-free holes and never reach that fragile path.
-+     * The low ~108TB stays unreserved for the native host allocator. */
-+    reserve_area( (void *)0x6f0000000000, (void *)0x7f0000000000 );
++            /* Crossover-IOS fork, patch 0006: on iOS the arm64 kernel mandates a
++             * 4GB __PAGEZERO and there is no Wine preloader, so dyld's own
++             * mappings (the main binary and its dylibs, placed just above the
++             * pagezero at ASLR-varying addresses) sit inside the range Wine
++             * scans here for free space. anon_mmap_tryfixed() reports those as
++             * ENOMEM rather than EEXIST, because mach_vm_map() returns a code
++             * other than KERN_NO_SPACE for them. Treat ENOMEM as "occupied,
++             * step past" instead of a fatal error; the loop is still bounded by
++             * `end`, and free space lies just beyond dyld's mappings. Without
++             * this the first PE dll load past the pagezero aborts the whole
++             * process (could not load kernel32.dll, c0000135) whenever the ASLR
++             * slide lands a native mapping in the search path. */
++            && errno != ENOMEM
 +#endif
-+
- #endif
- }
- 
-@@ -4058,8 +4128,16 @@ TEB *virtual_alloc_first_teb(void)
++            )
+         {
+             ERR( "mmap() error %s, range %p-%p, unix_prot %#x.\n",
+                  strerror(errno), start, (char *)start + size, unix_prot );
+@@ -4058,8 +4127,16 @@ TEB *virtual_alloc_first_teb(void)
          exit(1);
      }
  
