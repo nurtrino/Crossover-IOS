@@ -278,6 +278,28 @@ jobs:
               >>run.log 2>&1 || true
           fi
           echo "--- run.log (both attempts) ---"; cat run.log || true
+
+          echo "=== IN-PROCESS smoke: dlopen ntdll + __wine_main on a bg thread (the app's model) ==="
+          # Mirrors what the iOS app must do (iOS forbids spawning a separate
+          # loader): a NON-wine host dlopens ntdll.so, runs cmd.exe in-process on
+          # a background thread, and must SURVIVE the guest exit (WINE_INPROCESS
+          # routes process-exit to pthread_exit). ntdll self-locates the runtime.
+          xcrun clang -arch arm64 -isysroot "$SIMSDK" -mios-simulator-version-min=16.0 \
+            -o inproc_smoke native/ios/inproc_smoke.c 2>infra.log || { echo "compile failed"; cat infra.log; }
+          if [ -x inproc_smoke ]; then
+            run_bounded 120 -- xcrun simctl spawn "$UDID" /usr/bin/env WINEPREFIX="$WP" WINEDEBUG=+err,+seh \
+              "$PWD/inproc_smoke" "$BUILD/dlls/ntdll/ntdll.so" "$BUILD/loader/wine" \
+              >inproc.log 2>&1 || true
+            echo "--- inproc.log ---"; cat inproc.log || true
+          fi
+          if grep -q "INPROC_RAN_ARM64" inproc.log 2>/dev/null && grep -q "INPROC_HOST_SURVIVED" inproc.log 2>/dev/null; then
+            echo "::notice::IN-PROCESS: cmd.exe ran via dlopen'd ntdll AND the host survived the guest exit"
+            echo "inproc=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::in-process smoke did not fully pass (ran+survived)"
+            echo "inproc=no" >> "$GITHUB_OUTPUT"
+          fi
+
           echo "=== kernel/AMFI messages from the unified log (why SIGKILL) ==="
           log show --last 4m --style compact \
             --predicate 'eventMessage CONTAINS[c] "wine" OR process == "amfid" OR eventMessage CONTAINS[c] "CODE SIGNING" OR eventMessage CONTAINS[c] "pagezero"' \

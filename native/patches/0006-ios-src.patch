@@ -368,7 +368,7 @@ index 166fdf3b..c3fd5257 100644
      /* We use this run loop source for two purposes.  First, a run loop exits
       * if it has no more sources scheduled.  So, we need at least one source
 diff --git a/dlls/ntdll/unix/server.c b/dlls/ntdll/unix/server.c
-index 982caf5b..d1f51bf4 100644
+index 982caf5b..d6e35865 100644
 --- a/dlls/ntdll/unix/server.c
 +++ b/dlls/ntdll/unix/server.c
 @@ -1638,10 +1638,22 @@ static int server_connect(void)
@@ -401,6 +401,22 @@ index 982caf5b..d1f51bf4 100644
 +#endif  /* TARGET_OS_OSX */
  #endif  /* __APPLE__ */
  
+ 
+@@ -1749,6 +1762,15 @@ static int init_thread_pipe(void)
+ void process_exit_wrapper( int status )
+ {
+     close( fd_socket );
++#if defined(__APPLE__) && !TARGET_OS_OSX
++    /* Crossover-IOS fork, patch 0006: in the in-process app model the Wine
++     * runtime is dlopen'd inside the host (iOS forbids spawning a separate
++     * loader process), and Wine runs on a background thread. A guest process
++     * exit must NOT exit() the whole host app — end just this thread and hand
++     * the exit code back to the caller via pthread_join. Gated on WINE_INPROCESS
++     * so the ordinary separate-process runs (CI simulator) still exit normally. */
++    if (getenv( "WINE_INPROCESS" )) pthread_exit( (void *)(long)status );
++#endif
+     exit( status );
+ }
  
 diff --git a/dlls/ntdll/unix/signal_arm64.c b/dlls/ntdll/unix/signal_arm64.c
 index a08175d9..2faad00c 100644
@@ -702,6 +718,33 @@ index a7d927a4..0775ebe0 100644
  
  static NTSTATUS fill_battery_state( SYSTEM_BATTERY_STATE *bs )
  {
+diff --git a/dlls/ntdll/unix/thread.c b/dlls/ntdll/unix/thread.c
+index fff5fb30..340f970c 100644
+--- a/dlls/ntdll/unix/thread.c
++++ b/dlls/ntdll/unix/thread.c
+@@ -34,6 +34,9 @@
+ #include <string.h>
+ #include <pthread.h>
+ #include <signal.h>
++#ifdef __APPLE__
++# include <TargetConditionals.h>  /* Crossover-IOS: distinguish iOS from macOS */
++#endif
+ #include <sys/types.h>
+ #include <unistd.h>
+ #include <sys/mman.h>
+@@ -1484,6 +1487,12 @@ void abort_thread( int status )
+  */
+ void abort_process( int status )
+ {
++#if defined(__APPLE__) && !TARGET_OS_OSX
++    /* Crossover-IOS fork, patch 0006: in the in-process app model, end this
++     * Wine thread rather than _exit()-ing the whole host app. See the matching
++     * note in process_exit_wrapper (server.c). Gated on WINE_INPROCESS. */
++    if (getenv( "WINE_INPROCESS" )) pthread_exit( (void *)(long)status );
++#endif
+     _exit( get_unix_exit_code( status ));
+ }
+ 
 diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
 index 69bc6d16..4dbaf76e 100644
 --- a/dlls/ntdll/unix/virtual.c
