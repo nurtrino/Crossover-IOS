@@ -244,10 +244,14 @@ jobs:
             perl -e 'alarm shift @ARGV; exec @ARGV' "$secs" "$@"
             echo "(exit rc=$? after <=${secs}s)"
           }
-          echo "=== creating the prefix (wineboot, +seh,+tid to expose progress) ==="
+          echo "=== creating the prefix (wineboot, +module,+virtual to trace the dll-map failure) ==="
           run_bounded 150 -- xcrun simctl spawn "$UDID" /usr/bin/env WINEPREFIX="$WP" \
-            WINEDEBUG=+err,+seh,+tid "$BUILD/loader/wine" wineboot.exe --init >boot.log 2>&1 || true
-          echo "--- boot.log (tail 150) ---"; tail -150 boot.log || true
+            WINEDEBUG=+err,+seh,+module,+virtual "$BUILD/loader/wine" wineboot.exe --init >boot.log 2>&1 || true
+          echo "--- boot.log (tail 60) ---"; tail -60 boot.log || true
+          echo "=== DIAG: kernelbase/kernel32 load trace ==="
+          grep -n -E 'kernelbase|kernel32' boot.log | tail -40 || true
+          echo "=== DIAG: virtual map decisions + errors (tail 80) ==="
+          grep -n -E 'got mem|map_view|try_map_free_area|reserved|mapping PE file|c00000[0-9a-f][0-9a-f]|INVALID|CONFLICT|import_dll' boot.log | tail -80 || true
           echo "=== symbolize the recurring PE-ntdll fault ==="
           # every run faults at the same spot; map it back to a source line.
           # ntdll.dll links at 0x180000000; the runtime base is in the +module
