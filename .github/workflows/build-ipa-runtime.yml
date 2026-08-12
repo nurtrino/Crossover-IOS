@@ -222,48 +222,74 @@ jobs:
         run: |
           URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/CrossoverPad-runtime-unsigned.ipa"
           cat > notes.md <<EOF
-          # CrossoverPad — runtime-bearing unsigned IPA
+          # CrossoverPad 0.2 Release Alpha — runtime-bearing unsigned IPA
 
           **Direct download:** ${URL}
 
+          ## A Windows program now runs in the iOS runtime
+
+          The headline for 0.2: this exact Wine runtime, built for the iOS
+          Simulator and driven end-to-end in CI on an Apple-silicon macOS
+          runner (same CPU, same ABI, same 16 KB pages, same reserved-x18
+          behavior as a device), **executed a real Windows console program**.
+          \`cmd.exe /c echo WINDOWS_RAN_IN_IOS_SIM_%PROCESSOR_ARCHITECTURE%\`
+          printed **\`WINDOWS_RAN_IN_IOS_SIM_ARM64\`** and exited 0 — Windows
+          PE code running under Wine inside the iOS Simulator. The
+          \`wine-ios-sim-run\` workflow reproduces this on every push.
+
+          Getting there meant solving four Apple-arm64 architectural blockers,
+          each proven by the sim run:
+          1. **x18 / TEB.** iOS zeroes x18 (which Wine uses to hold the TEB) on
+             every kernel→user transition. Re-established on every signal-resume
+             path plus a self-healing catch-all in the SIGSEGV handler.
+          2. **KUSER / address space.** The arm64 kernel walls off the low 4 GB,
+             so the shared-user-data page is relocated above 4 GB and the loader
+             uses the default Mach-O layout.
+          3. **PE dll mapping.** With a mandatory 4 GB \`__PAGEZERO\` and no Wine
+             preloader, dyld's own mappings land in the range Wine scans for free
+             space; \`try_map_free_area\` now steps past them (Apple reports them
+             as ENOMEM, not EEXIST) instead of aborting the load.
+          4. **Syscall ABI.** The Apple arm64 ABI packs sub-8-byte stack
+             arguments to natural size, while the Windows guest and Wine's
+             dispatcher use 8-byte slots — so \`NtMapViewOfSection\`'s
+             \`protect\` arg (arg 10) was read from the wrong offset, failing
+             every dll load. Fixed at the syscall boundary.
+
+          ## What the IPA contains
+
           This build EMBEDS the **complete** iOS-native Wine runtime:
           - \`WineRuntime/lib/\` — the loader (\`wine\`), \`wineserver\`, and
-            every Wine unixlib \`.so\` (\`ntdll.so\`, \`win32u.so\`, and the rest),
-            cross-built as **arm64 Mach-O** against the iPhoneOS SDK with the
-            forkless in-process model;
+            every Wine unixlib \`.so\` (\`ntdll.so\`, \`win32u.so\`, …), cross-built
+            as **arm64 Mach-O** against the iPhoneOS SDK with the forkless
+            in-process model;
           - \`WineRuntime/pe/\` — the **native arm64-Windows** guest set: the
             Windows PE DLLs plus the console programs (\`cmd.exe\`,
             \`wineboot.exe\`). arm64 guests run natively on an arm64 device — no
             x86 emulation;
           - \`WineRuntime/prefix/\` — the prepared Wine prefix (registry +
-            drive layout skeleton).
+            drive-layout skeleton).
 
-          **What is proven vs. what the device testing measures.** This same
-          runtime, built for the iOS Simulator, was driven end-to-end in CI:
-          it execs, sets up the Windows address space (the shared-user-data
-          page is relocated above 4 GB because the arm64 kernel walls off the
-          low 4 GB), allocates TEBs, starts \`wineserver\`, creates a
-          pseudo-process, and the PE loader maps and relocates \`ntdll.dll\`.
-          Guest init then hits the known **Apple-arm64 x18/TEB** blocker
-          (PE code reads the TEB from x18, which Apple reserves) — the last
-          architectural item, documented in \`docs/HANDOFF-M2.md\`.
+          ## Simulator vs. device — honest scope
 
-          **Channel capabilities.** JIT/W^X (needed by the PE loader) is
-          available on a debugger-assisted channel such as **StikDebug**, and
-          the raised memory / extended-VA limits are declared in
+          The Simulator run above is faithful to the CPU, ABI, page size and
+          x18 behavior, but NOT to code-signing/JIT (it runs under the macOS
+          kernel). On a real device the identical runtime needs **JIT/W^X** for
+          the PE loader — available on a debugger-assisted channel such as
+          **StikDebug** — and the raised memory / extended-VA limits declared in
           \`CrossoverPad.entitlements\` (increased-memory-limit,
-          extended-virtual-addressing) for the sideload signer to apply.
-          \`EngineCapabilities.jitAvailable()\` probes JIT live (CS_DEBUGGED +
-          an RWX-map attempt) rather than trusting a build flag. That leaves the
-          x18/TEB fix and the UIKit/Metal display driver (GUI only; a console
-          guest needs neither) — and StikDebug's debugger is itself the tool to
-          finish x18/TEB on-device. The app reports the runtime tier truthfully
-          and \`NativeWineEngine\` fails with a specific reason rather than
-          pretending to run.
+          extended-virtual-addressing). \`EngineCapabilities.jitAvailable()\`
+          probes JIT live (CS_DEBUGGED + an RWX-map attempt) rather than trusting
+          a build flag, and the app reports the runtime tier truthfully instead
+          of pretending to run. A GUI guest additionally needs the UIKit/Metal
+          display driver; a console guest needs neither.
+
+          This is an **alpha for on-device testing.** Install unsigned via your
+          sideload channel, attach StikDebug for JIT, and exercise the console
+          path first.
 
           Built by run ${{ github.run_id }} from ${{ github.sha }}.
           EOF
           gh release create "$TAG" CrossoverPad/CrossoverPad-runtime-unsigned.ipa \
-            --title "CrossoverPad runtime-bearing IPA (${TAG})" \
+            --title "CrossoverPad 0.2 Release Alpha (${TAG})" \
             --notes-file notes.md --prerelease --target "${{ github.sha }}"
           echo "Release: https://github.com/${{ github.repository }}/releases/tag/${TAG}"
