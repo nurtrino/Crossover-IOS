@@ -244,14 +244,18 @@ jobs:
             perl -e 'alarm shift @ARGV; exec @ARGV' "$secs" "$@"
             echo "(exit rc=$? after <=${secs}s)"
           }
-          echo "=== creating the prefix (wineboot, +module,+virtual to trace the dll-map failure) ==="
+          echo "=== creating the prefix (wineboot, +err,+seh only) ==="
           run_bounded 150 -- xcrun simctl spawn "$UDID" /usr/bin/env WINEPREFIX="$WP" \
-            WINEDEBUG=+err,+seh,+module,+virtual "$BUILD/loader/wine" wineboot.exe --init >boot.log 2>&1 || true
-          echo "--- boot.log (tail 60) ---"; tail -60 boot.log || true
-          echo "=== DIAG: kernelbase/kernel32 load trace ==="
-          grep -n -E 'kernelbase|kernel32' boot.log | tail -40 || true
-          echo "=== DIAG: virtual map decisions + errors (tail 80) ==="
-          grep -n -E 'got mem|map_view|try_map_free_area|reserved|mapping PE file|c00000[0-9a-f][0-9a-f]|INVALID|CONFLICT|import_dll' boot.log | tail -80 || true
+            WINEDEBUG=+err,+seh "$BUILD/loader/wine" wineboot.exe --init >boot.log 2>&1 || true
+          echo "--- boot.log (tail 40) ---"; tail -40 boot.log || true
+          echo "=== DIAG: trace kernelbase map on a dedicated +module,+virtual cmd.exe run ==="
+          run_bounded 120 -- xcrun simctl spawn "$UDID" /usr/bin/env WINEPREFIX="$WP" \
+            WINEDEBUG=+err,+seh,+module,+virtual "$BUILD/loader/wine" cmd.exe /c "echo DIAG" \
+            >diag.log 2>&1 || true
+          echo "--- DIAG: kernelbase mapping (address + sections + what fails right after) ---"
+          grep -n -B3 -A18 -E 'mapping PE file.*kernelbase' diag.log | tail -60 || true
+          echo "--- DIAG: context leading to c0000045 ---"
+          grep -n -B15 -A1 -E 'c0000045|INVALID_PAGE|import_dll.*kernelbase' diag.log | tail -60 || true
           echo "=== symbolize the recurring PE-ntdll fault ==="
           # every run faults at the same spot; map it back to a source line.
           # ntdll.dll links at 0x180000000; the runtime base is in the +module
