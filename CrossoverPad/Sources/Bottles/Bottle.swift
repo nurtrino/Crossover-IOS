@@ -25,6 +25,10 @@ struct Bottle: Identifiable, Codable, Equatable {
     /// Path inside the guest to the installed program, once known.
     var entryPoint: String?
     var createdAt: Date
+    /// Why the last start attempt failed, verbatim from the engine. A bare
+    /// `.broken` state tells the user nothing; the engine always has a
+    /// specific reason, so keep it and show it.
+    var lastError: String?
 
     init(
         id: UUID = UUID(),
@@ -32,7 +36,8 @@ struct Bottle: Identifiable, Codable, Equatable {
         guestType: GuestType = .linuxWine,
         state: State = .created,
         entryPoint: String? = nil,
-        createdAt: Date = .now
+        createdAt: Date = .now,
+        lastError: String? = nil
     ) {
         self.id = id
         self.name = name
@@ -40,5 +45,6 @@ struct Bottle: Identifiable, Codable, Equatable {
         self.state = state
         self.entryPoint = entryPoint
         self.createdAt = createdAt
+        self.lastError = lastError
     }
 }

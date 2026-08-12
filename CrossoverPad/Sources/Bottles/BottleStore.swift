@@ -72,15 +72,21 @@ final class BottleStore: ObservableObject {
     func run(_ bottle: Bottle) async {
         var running = bottle
         running.state = .running
+        running.lastError = nil
         update(running)
         do {
             try await engine.start(bottle: bottle)
         } catch {
             running.state = .broken
+            // Keep the engine's specific reason — "broken" on its own is
+            // useless to whoever is holding the device.
+            running.lastError = (error as? LocalizedError)?.errorDescription
+                ?? error.localizedDescription
             update(running)
             return
         }
         running.state = bottle.entryPoint == nil ? .created : .ready
+        running.lastError = nil
         update(running)
     }
 
