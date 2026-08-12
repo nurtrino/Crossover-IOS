@@ -248,14 +248,20 @@ jobs:
           run_bounded 150 -- xcrun simctl spawn "$UDID" /usr/bin/env WINEPREFIX="$WP" \
             WINEDEBUG=+err,+seh "$BUILD/loader/wine" wineboot.exe --init >boot.log 2>&1 || true
           echo "--- boot.log (tail 40) ---"; tail -40 boot.log || true
-          echo "=== DIAG: trace kernelbase map on a dedicated +module,+virtual cmd.exe run ==="
+          echo "=== DIAG: does kernelbase.dll exist + its PE header ==="
+          KB="$BUILD/dlls/kernelbase/aarch64-windows/kernelbase.dll"
+          ls -la "$KB" 2>&1 || echo "MISSING kernelbase.dll"
+          echo "size on disk: $(wc -c < "$KB" 2>/dev/null || echo NA)"
+          echo "=== DIAG: trace kernelbase load on a dedicated +loaddll,+module,+virtual cmd.exe run ==="
           run_bounded 120 -- xcrun simctl spawn "$UDID" /usr/bin/env WINEPREFIX="$WP" \
-            WINEDEBUG=+err,+seh,+module,+virtual "$BUILD/loader/wine" cmd.exe /c "echo DIAG" \
+            WINEDEBUG=+err,+seh,+loaddll,+module,+virtual "$BUILD/loader/wine" cmd.exe /c "echo DIAG" \
             >diag.log 2>&1 || true
-          echo "--- DIAG: kernelbase mapping (address + sections + what fails right after) ---"
-          grep -n -B3 -A18 -E 'mapping PE file.*kernelbase' diag.log | tail -60 || true
-          echo "--- DIAG: context leading to c0000045 ---"
-          grep -n -B15 -A1 -E 'c0000045|INVALID_PAGE|import_dll.*kernelbase' diag.log | tail -60 || true
+          echo "--- DIAG: FULL guest sequence for kernelbase (looking-for .. failure) ---"
+          awk '/looking for L?.?kernelbase/{p=1} p{print NR": "$0} /kernelbase.*c0000045|Failed to load module.*kernelbase/{if(p){c++; if(c>=2)exit}}' diag.log | tail -80 || true
+          echo "--- DIAG: every kernelbase line ---"
+          grep -n -iE 'kernelbase' diag.log | head -50 || true
+          echo "--- DIAG: the map_view/section decision right before c0000045 ---"
+          grep -n -B25 -A1 -E 'Failed to load module L..kernelbase|import_dll.*kernelbase.*c0000045' diag.log | tail -50 || true
           echo "=== symbolize the recurring PE-ntdll fault ==="
           # every run faults at the same spot; map it back to a source line.
           # ntdll.dll links at 0x180000000; the runtime base is in the +module
