@@ -266,24 +266,6 @@ index a13d77a4..296720c2 100644
  #ifdef __APPLE__
  #include <sys/ioctl.h>
  #include <sys/kern_event.h>
-diff --git a/dlls/ntdll/loader.c b/dlls/ntdll/loader.c
-index ac4cffea..8e0b8dc8 100644
---- a/dlls/ntdll/loader.c
-+++ b/dlls/ntdll/loader.c
-@@ -2859,8 +2859,12 @@ static NTSTATUS load_native_dll( LPCWSTR load_path, const UNICODE_STRING *nt_nam
- {
-     void *module = NULL;
-     SIZE_T len = 0;
--    NTSTATUS status = NtMapViewOfSection( mapping, NtCurrentProcess(), &module, 0, 0, NULL, &len,
-+    NTSTATUS status;
-+    ERR( "XDIAG load_native_dll %s calling NtMapViewOfSection protect=%x (PAGE_EXECUTE_READ=%x)\n",
-+         debugstr_us(nt_name), PAGE_EXECUTE_READ, PAGE_EXECUTE_READ );
-+    status = NtMapViewOfSection( mapping, NtCurrentProcess(), &module, 0, 0, NULL, &len,
-                                           ViewShare, 0, PAGE_EXECUTE_READ );
-+    ERR( "XDIAG load_native_dll %s NtMapViewOfSection returned %x\n", debugstr_us(nt_name), status );
- 
-     if (!NT_SUCCESS(status)) return status;
- 
 diff --git a/dlls/ntdll/thread.c b/dlls/ntdll/thread.c
 index 3d1e6e0f..c2676f3f 100644
 --- a/dlls/ntdll/thread.c
@@ -721,7 +703,7 @@ index a7d927a4..0775ebe0 100644
  static NTSTATUS fill_battery_state( SYSTEM_BATTERY_STATE *bs )
  {
 diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
-index 69bc6d16..028c5f79 100644
+index 69bc6d16..4dbaf76e 100644
 --- a/dlls/ntdll/unix/virtual.c
 +++ b/dlls/ntdll/unix/virtual.c
 @@ -24,6 +24,10 @@
@@ -832,27 +814,7 @@ index 69bc6d16..028c5f79 100644
          {
              ERR( "mmap() error %s, range %p-%p, unix_prot %#x.\n",
                   strerror(errno), start, (char *)start + size, unix_prot );
-@@ -3488,6 +3557,19 @@ static unsigned int virtual_map_section( HANDLE handle, PVOID *addr_ptr, ULONG_P
-     LARGE_INTEGER offset;
-     sigset_t sigset;
- 
-+    {
-+        SYSTEM_SERVICE_TABLE *t = KeServiceDescriptorTable;
-+        struct syscall_frame *f = get_syscall_frame();
-+        ULONG64 gsp = f ? *(volatile ULONG64 *)((char *)f + 0xf8) : 0;  /* frame->sp */
-+        ULONG64 *ga = (ULONG64 *)gsp;
-+        ERR( "XDIAG virtual_map_section protect=%x alloc_type=%x ArgTab[0x28]=%u guest_sp=%llx slot0=%llx slot1=%llx slot2=%llx\n",
-+             protect, alloc_type,
-+             t && t[0].ArgumentTable ? t[0].ArgumentTable[0x28] : 0xffff,
-+             (unsigned long long)gsp,
-+             (unsigned long long)(ga ? ga[0] : 0),
-+             (unsigned long long)(ga ? ga[1] : 0),
-+             (unsigned long long)(ga ? ga[2] : 0) );
-+    }
-     switch(protect)
-     {
-     case PAGE_NOACCESS:
-@@ -4058,8 +4140,16 @@ TEB *virtual_alloc_first_teb(void)
+@@ -4058,8 +4127,16 @@ TEB *virtual_alloc_first_teb(void)
          exit(1);
      }
  
@@ -869,6 +831,39 @@ index 69bc6d16..028c5f79 100644
      teb_block_pos = 30;
      ptr = (char *)teb_block + 30 * block_size;
      data_size = 2 * block_size;
+@@ -6220,6 +6297,32 @@ NTSTATUS WINAPI NtMapViewOfSection( HANDLE handle, HANDLE process, PVOID *addr_p
+     SIZE_T mask = granularity_mask;
+     LARGE_INTEGER offset;
+ 
++#if defined(__APPLE__) && !TARGET_OS_OSX
++    /* Crossover-IOS fork, patch 0006: the Apple arm64 ABI packs sub-8-byte stack
++     * arguments to their natural size, but the Windows guest and Wine's arm64
++     * syscall dispatcher lay every stack argument out in an 8-byte slot (and do
++     * NOT zero-extend a 4-byte value's high half). NtMapViewOfSection's 9th and
++     * 10th arguments (alloc_type, protect) are both 4-byte and consecutive, so
++     * the Apple-ABI-compiled unix side reads `protect` from the packed offset
++     * (the garbage high half of alloc_type's slot) instead of its own slot,
++     * yielding a bogus protection and STATUS_INVALID_PAGE_PROTECTION on every PE
++     * dll load. When we are the direct target of the NtMapViewOfSection syscall,
++     * re-read both from the low 32 bits of the 8-byte slots the dispatcher saved
++     * at frame->sp. The syscall-id guard leaves nested unix callers (the server
++     * map-view path, NtMapViewOfSectionEx) — which pass correct Apple-ABI args —
++     * untouched. Offsets match struct syscall_frame (sp @0xf8, syscall_id @0x120)
++     * in signal_arm64.c. See its C_ASSERTs. */
++    {
++        struct syscall_frame *frame = get_syscall_frame();
++        if (frame && *(volatile ULONG *)((char *)frame + 0x120) == 0x0028) /* NtMapViewOfSection */
++        {
++            const ULONG64 *slots = *(ULONG64 *const *)((char *)frame + 0xf8); /* frame->sp */
++            alloc_type = (ULONG)slots[0]; /* arg 9  */
++            protect    = (ULONG)slots[1]; /* arg 10 */
++        }
++    }
++#endif
++
+     offset.QuadPart = offset_ptr ? offset_ptr->QuadPart : 0;
+ 
+     TRACE("handle=%p process=%p addr=%p off=%s size=0x%lx alloc_type=0x%x access=0x%x\n",
 diff --git a/dlls/ntoskrnl.exe/instr.c b/dlls/ntoskrnl.exe/instr.c
 index 03f48152..5e08ec5e 100644
 --- a/dlls/ntoskrnl.exe/instr.c

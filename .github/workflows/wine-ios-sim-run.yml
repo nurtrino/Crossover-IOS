@@ -247,8 +247,7 @@ jobs:
           echo "=== creating the prefix (wineboot, +err,+seh only) ==="
           run_bounded 150 -- xcrun simctl spawn "$UDID" /usr/bin/env WINEPREFIX="$WP" \
             WINEDEBUG=+err,+seh "$BUILD/loader/wine" wineboot.exe --init >boot.log 2>&1 || true
-          echo "--- boot.log: XDIAG protect-marshaling probe (both sides of the syscall) ---"
-          grep -n -E 'XDIAG|kernelbase|c0000045' boot.log | tail -40 || true
+          echo "--- boot.log (tail 40) ---"; tail -40 boot.log || true
           echo "=== symbolize the recurring PE-ntdll fault ==="
           # every run faults at the same spot; map it back to a source line.
           # ntdll.dll links at 0x180000000; the runtime base is in the +module
