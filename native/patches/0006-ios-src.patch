@@ -403,7 +403,7 @@ index 982caf5b..d1f51bf4 100644
  
  
 diff --git a/dlls/ntdll/unix/signal_arm64.c b/dlls/ntdll/unix/signal_arm64.c
-index a08175d9..3166abd1 100644
+index a08175d9..eada9479 100644
 --- a/dlls/ntdll/unix/signal_arm64.c
 +++ b/dlls/ntdll/unix/signal_arm64.c
 @@ -26,6 +26,10 @@
@@ -417,7 +417,7 @@ index a08175d9..3166abd1 100644
  #include <assert.h>
  #include <pthread.h>
  #include <signal.h>
-@@ -272,6 +276,51 @@ static void restore_fpu( const CONTEXT *context, ucontext_t *sigcontext )
+@@ -272,6 +276,50 @@ static void restore_fpu( const CONTEXT *context, ucontext_t *sigcontext )
  }
  
  
@@ -436,15 +436,12 @@ index a08175d9..3166abd1 100644
 + */
 +#if defined(__APPLE__) && !TARGET_OS_OSX
 +extern void __wine_ios_teb_trampoline(void);
-+/* The kernel restores all GPRs except x18 and resumes here. TEB and the real
-+ * resume PC were stashed just below the resume SP (ARM64 has no red zone, but
-+ * memory below SP is unused and nothing runs on this stack between sigreturn
-+ * and here). Restore x18, then branch via x16 (IP0 — ABI-corruptible by any
-+ * call/veneer, so safe to clobber at a resume point). */
++/* The kernel restores every GPR except x18 (special-cased to 0) on sigreturn.
++ * resume_with_teb stashes the TEB in x16 and the real resume PC in x17; here
++ * we move x16 into x18 and branch to x17. Pure register handoff — no memory. */
 +__ASM_GLOBAL_FUNC( __wine_ios_teb_trampoline,
-+                   "ldr x18, [sp, #-8]\n\t"    /* TEB */
-+                   "ldr x16, [sp, #-16]\n\t"   /* real resume PC */
-+                   "br x16" )
++                   "mov x18, x16\n\t"          /* TEB (kernel restored x16) */
++                   "br x17" )                     /* real resume PC */
 +#endif
 +
 +/* Set the signal context to resume at PC with x18 = TEB. On iOS the kernel
@@ -455,9 +452,11 @@ index a08175d9..3166abd1 100644
 +static inline void resume_with_teb( ucontext_t *sigcontext, ULONG_PTR pc, ULONG_PTR teb )
 +{
 +#if defined(__APPLE__) && !TARGET_OS_OSX
-+    ULONG_PTR *sp = (ULONG_PTR *)SP_sig( sigcontext );
-+    sp[-1] = teb;   /* [sp-8]  */
-+    sp[-2] = pc;    /* [sp-16] */
++    /* stash TEB and PC in x16/x17, which the kernel restores on sigreturn
++     * (only x18 is special-cased to 0); the trampoline moves x16->x18 and
++     * branches to x17. No memory stash -> nothing to corrupt. */
++    REGn_sig( 16, sigcontext ) = teb;
++    REGn_sig( 17, sigcontext ) = pc;
 +    PC_sig( sigcontext ) = (ULONG_PTR)__wine_ios_teb_trampoline;
 +#else
 +    PC_sig( sigcontext ) = pc;
@@ -469,7 +468,7 @@ index a08175d9..3166abd1 100644
  /***********************************************************************
   *           save_context
   *
-@@ -288,6 +337,9 @@ static void save_context( CONTEXT *context, const ucontext_t *sigcontext )
+@@ -288,6 +336,9 @@ static void save_context( CONTEXT *context, const ucontext_t *sigcontext )
      context->Pc   = PC_sig(sigcontext);     /* Program Counter */
      context->Cpsr = PSTATE_sig(sigcontext); /* Current State Register */
      for (i = 0; i <= 28; i++) context->X[i] = REGn_sig( i, sigcontext );
@@ -479,7 +478,7 @@ index a08175d9..3166abd1 100644
      save_fpu( context, sigcontext );
  }
  
-@@ -308,6 +360,11 @@ static void restore_context( const CONTEXT *context, ucontext_t *sigcontext )
+@@ -308,6 +359,11 @@ static void restore_context( const CONTEXT *context, ucontext_t *sigcontext )
      PSTATE_sig(sigcontext) = context->Cpsr; /* Current State Register */
      for (i = 0; i <= 28; i++) REGn_sig( i, sigcontext ) = context->X[i];
      restore_fpu( context, sigcontext );
@@ -491,7 +490,7 @@ index a08175d9..3166abd1 100644
  }
  
  
-@@ -724,8 +781,7 @@ static void setup_raise_exception( ucontext_t *sigcontext, EXCEPTION_RECORD *rec
+@@ -724,8 +780,7 @@ static void setup_raise_exception( ucontext_t *sigcontext, EXCEPTION_RECORD *rec
      stack->pc = stack->context.Pc;
  
      SP_sig(sigcontext) = (ULONG_PTR)stack;
@@ -501,7 +500,7 @@ index a08175d9..3166abd1 100644
  }
  
  
-@@ -1054,9 +1110,8 @@ static BOOL handle_syscall_fault( ucontext_t *context, EXCEPTION_RECORD *rec )
+@@ -1054,14 +1109,29 @@ static BOOL handle_syscall_fault( ucontext_t *context, EXCEPTION_RECORD *rec )
      {
          TRACE( "returning to user mode ip=%p ret=%08x\n", (void *)frame->pc, rec->ExceptionCode );
          REGn_sig(0, context)  = rec->ExceptionCode;
@@ -512,7 +511,36 @@ index a08175d9..3166abd1 100644
      }
      return TRUE;
  }
-@@ -1078,7 +1133,15 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+ 
+ 
++/***********************************************************************
++ *           init_handler
++ *
++ * Crossover-IOS fork, patch 0006: iOS clears x18 on entry to a signal handler
++ * (as on every kernel->user transition). Wine reads the TEB from x18, so
++ * re-establish it from the durable pthread-backed NtCurrentTeb() before any
++ * handler code runs. No-op on macOS/Linux where x18 is preserved.
++ */
++static inline void init_handler(void)
++{
++#if defined(__APPLE__) && !TARGET_OS_OSX
++    __asm__ volatile( "mov x18, %0" :: "r"((ULONG_PTR)NtCurrentTeb()) );
++#endif
++}
++
++
+ /**********************************************************************
+  *		segv_handler
+  *
+@@ -1069,6 +1139,7 @@ static BOOL handle_syscall_fault( ucontext_t *context, EXCEPTION_RECORD *rec )
+  */
+ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+ {
++    init_handler();
+     EXCEPTION_RECORD rec = { 0 };
+     ucontext_t *context = sigcontext;
+     DWORD64 esr = get_fault_esr( context );
+@@ -1078,7 +1149,15 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
      else if (esr & 0x40) rec.ExceptionInformation[0] = EXCEPTION_WRITE_FAULT;
      else rec.ExceptionInformation[0] = EXCEPTION_READ_FAULT;
      rec.ExceptionInformation[1] = (ULONG_PTR)siginfo->si_addr;
@@ -529,6 +557,78 @@ index a08175d9..3166abd1 100644
      if (handle_syscall_fault( context, &rec )) return;
      setup_exception( context, &rec );
  }
+@@ -1091,6 +1170,7 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+  */
+ static void ill_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+ {
++    init_handler();
+     EXCEPTION_RECORD rec = { EXCEPTION_ILLEGAL_INSTRUCTION };
+     ucontext_t *context = sigcontext;
+ 
+@@ -1119,6 +1199,7 @@ static void ill_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+  */
+ static void bus_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+ {
++    init_handler();
+     EXCEPTION_RECORD rec = { EXCEPTION_DATATYPE_MISALIGNMENT };
+ 
+     setup_exception( sigcontext, &rec );
+@@ -1132,6 +1213,7 @@ static void bus_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+  */
+ static void trap_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+ {
++    init_handler();
+     EXCEPTION_RECORD rec = { 0 };
+     ucontext_t *context = sigcontext;
+     CONTEXT ctx;
+@@ -1191,6 +1273,7 @@ static void trap_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+  */
+ static void fpe_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+ {
++    init_handler();
+     EXCEPTION_RECORD rec = { 0 };
+ 
+     switch (siginfo->si_code & 0xffff )
+@@ -1248,6 +1331,7 @@ static void fpe_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+  */
+ static void int_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+ {
++    init_handler();
+     HANDLE handle;
+ 
+     if (!p__wine_ctrl_routine) return;
+@@ -1264,6 +1348,7 @@ static void int_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+  */
+ static void abrt_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+ {
++    init_handler();
+     EXCEPTION_RECORD rec = { EXCEPTION_WINE_ASSERTION, EXCEPTION_NONCONTINUABLE };
+ 
+     setup_exception( sigcontext, &rec );
+@@ -1277,6 +1362,7 @@ static void abrt_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+  */
+ static void quit_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+ {
++    init_handler();
+     ucontext_t *context = sigcontext;
+ 
+     if (!is_inside_syscall( SP_sig(context) )) user_mode_abort_thread( 0, get_syscall_frame() );
+@@ -1291,6 +1377,7 @@ static void quit_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+  */
+ static void usr1_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+ {
++    init_handler();
+     ucontext_t *ucontext = sigcontext;
+     CONTEXT context;
+ 
+@@ -1318,6 +1405,7 @@ static void usr1_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+  */
+ static void usr2_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+ {
++    init_handler();
+     struct syscall_frame *frame = get_syscall_frame();
+     ucontext_t *context = sigcontext;
+     DWORD i;
 diff --git a/dlls/ntdll/unix/system.c b/dlls/ntdll/unix/system.c
 index a7d927a4..0775ebe0 100644
 --- a/dlls/ntdll/unix/system.c
