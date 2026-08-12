@@ -403,7 +403,7 @@ index 982caf5b..d1f51bf4 100644
  
  
 diff --git a/dlls/ntdll/unix/signal_arm64.c b/dlls/ntdll/unix/signal_arm64.c
-index a08175d9..eada9479 100644
+index a08175d9..2faad00c 100644
 --- a/dlls/ntdll/unix/signal_arm64.c
 +++ b/dlls/ntdll/unix/signal_arm64.c
 @@ -26,6 +26,10 @@
@@ -532,7 +532,7 @@ index a08175d9..eada9479 100644
  /**********************************************************************
   *		segv_handler
   *
-@@ -1069,6 +1139,7 @@ static BOOL handle_syscall_fault( ucontext_t *context, EXCEPTION_RECORD *rec )
+@@ -1069,16 +1139,53 @@ static BOOL handle_syscall_fault( ucontext_t *context, EXCEPTION_RECORD *rec )
   */
  static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
  {
@@ -540,7 +540,37 @@ index a08175d9..eada9479 100644
      EXCEPTION_RECORD rec = { 0 };
      ucontext_t *context = sigcontext;
      DWORD64 esr = get_fault_esr( context );
-@@ -1078,7 +1149,15 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+ 
++#if defined(__APPLE__) && !TARGET_OS_OSX
++    /* Self-healing for the iOS x18/TEB problem. The iOS kernel zeroes x18 on
++     * every kernel->user transition, so despite re-establishing x18 on every
++     * resume path a stray leak can still surface as a data-abort whose faulting
++     * instruction uses x18 as its base register at a near-null address. That
++     * signature is unambiguous: a valid TEB never lives near null, so an x18-base
++     * load/store faulting below 0x10000 means x18 was clobbered to ~0. Reload the
++     * TEB and re-execute the instruction; this cannot mask a genuine bug. */
++    if ((PSTATE_sig( context ) & 0x10) == 0 &&              /* AArch64, not WoW */
++        (PC_sig( context ) & 3) == 0 &&
++        (ULONG_PTR)siginfo->si_addr < 0x10000)
++    {
++        unsigned int instr = *(unsigned int *)PC_sig( context );
++        if (((instr >> 5) & 0x1f) == 18)                   /* Rn == x18 */
++        {
++            static __thread ULONG_PTR heal_pc;
++            static __thread int       heal_count;
++            if (PC_sig( context ) != heal_pc) { heal_pc = PC_sig( context ); heal_count = 0; }
++            if (++heal_count <= 8)
++            {
++                resume_with_teb( context, PC_sig( context ), (ULONG_PTR)NtCurrentTeb() );
++                return;
++            }
++            /* same PC keeps faulting after reload: not an x18 leak, fall through */
++        }
++    }
++#endif
++
+     rec.NumberParameters = 2;
+     if ((esr & 0xf0000000) == 0x80000000) rec.ExceptionInformation[0] = EXCEPTION_EXECUTE_FAULT;
      else if (esr & 0x40) rec.ExceptionInformation[0] = EXCEPTION_WRITE_FAULT;
      else rec.ExceptionInformation[0] = EXCEPTION_READ_FAULT;
      rec.ExceptionInformation[1] = (ULONG_PTR)siginfo->si_addr;
@@ -557,7 +587,7 @@ index a08175d9..eada9479 100644
      if (handle_syscall_fault( context, &rec )) return;
      setup_exception( context, &rec );
  }
-@@ -1091,6 +1170,7 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+@@ -1091,6 +1198,7 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
   */
  static void ill_handler( int signal, siginfo_t *siginfo, void *sigcontext )
  {
@@ -565,7 +595,7 @@ index a08175d9..eada9479 100644
      EXCEPTION_RECORD rec = { EXCEPTION_ILLEGAL_INSTRUCTION };
      ucontext_t *context = sigcontext;
  
-@@ -1119,6 +1199,7 @@ static void ill_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+@@ -1119,6 +1227,7 @@ static void ill_handler( int signal, siginfo_t *siginfo, void *sigcontext )
   */
  static void bus_handler( int signal, siginfo_t *siginfo, void *sigcontext )
  {
@@ -573,7 +603,7 @@ index a08175d9..eada9479 100644
      EXCEPTION_RECORD rec = { EXCEPTION_DATATYPE_MISALIGNMENT };
  
      setup_exception( sigcontext, &rec );
-@@ -1132,6 +1213,7 @@ static void bus_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+@@ -1132,6 +1241,7 @@ static void bus_handler( int signal, siginfo_t *siginfo, void *sigcontext )
   */
  static void trap_handler( int signal, siginfo_t *siginfo, void *sigcontext )
  {
@@ -581,7 +611,7 @@ index a08175d9..eada9479 100644
      EXCEPTION_RECORD rec = { 0 };
      ucontext_t *context = sigcontext;
      CONTEXT ctx;
-@@ -1191,6 +1273,7 @@ static void trap_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+@@ -1191,6 +1301,7 @@ static void trap_handler( int signal, siginfo_t *siginfo, void *sigcontext )
   */
  static void fpe_handler( int signal, siginfo_t *siginfo, void *sigcontext )
  {
@@ -589,7 +619,7 @@ index a08175d9..eada9479 100644
      EXCEPTION_RECORD rec = { 0 };
  
      switch (siginfo->si_code & 0xffff )
-@@ -1248,6 +1331,7 @@ static void fpe_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+@@ -1248,6 +1359,7 @@ static void fpe_handler( int signal, siginfo_t *siginfo, void *sigcontext )
   */
  static void int_handler( int signal, siginfo_t *siginfo, void *sigcontext )
  {
@@ -597,7 +627,7 @@ index a08175d9..eada9479 100644
      HANDLE handle;
  
      if (!p__wine_ctrl_routine) return;
-@@ -1264,6 +1348,7 @@ static void int_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+@@ -1264,6 +1376,7 @@ static void int_handler( int signal, siginfo_t *siginfo, void *sigcontext )
   */
  static void abrt_handler( int signal, siginfo_t *siginfo, void *sigcontext )
  {
@@ -605,7 +635,7 @@ index a08175d9..eada9479 100644
      EXCEPTION_RECORD rec = { EXCEPTION_WINE_ASSERTION, EXCEPTION_NONCONTINUABLE };
  
      setup_exception( sigcontext, &rec );
-@@ -1277,6 +1362,7 @@ static void abrt_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+@@ -1277,6 +1390,7 @@ static void abrt_handler( int signal, siginfo_t *siginfo, void *sigcontext )
   */
  static void quit_handler( int signal, siginfo_t *siginfo, void *sigcontext )
  {
@@ -613,7 +643,7 @@ index a08175d9..eada9479 100644
      ucontext_t *context = sigcontext;
  
      if (!is_inside_syscall( SP_sig(context) )) user_mode_abort_thread( 0, get_syscall_frame() );
-@@ -1291,6 +1377,7 @@ static void quit_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+@@ -1291,6 +1405,7 @@ static void quit_handler( int signal, siginfo_t *siginfo, void *sigcontext )
   */
  static void usr1_handler( int signal, siginfo_t *siginfo, void *sigcontext )
  {
@@ -621,7 +651,7 @@ index a08175d9..eada9479 100644
      ucontext_t *ucontext = sigcontext;
      CONTEXT context;
  
-@@ -1318,6 +1405,7 @@ static void usr1_handler( int signal, siginfo_t *siginfo, void *sigcontext )
+@@ -1318,6 +1433,7 @@ static void usr1_handler( int signal, siginfo_t *siginfo, void *sigcontext )
   */
  static void usr2_handler( int signal, siginfo_t *siginfo, void *sigcontext )
  {
