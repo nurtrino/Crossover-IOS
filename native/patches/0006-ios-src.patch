@@ -266,6 +266,24 @@ index a13d77a4..296720c2 100644
  #ifdef __APPLE__
  #include <sys/ioctl.h>
  #include <sys/kern_event.h>
+diff --git a/dlls/ntdll/loader.c b/dlls/ntdll/loader.c
+index ac4cffea..8e0b8dc8 100644
+--- a/dlls/ntdll/loader.c
++++ b/dlls/ntdll/loader.c
+@@ -2859,8 +2859,12 @@ static NTSTATUS load_native_dll( LPCWSTR load_path, const UNICODE_STRING *nt_nam
+ {
+     void *module = NULL;
+     SIZE_T len = 0;
+-    NTSTATUS status = NtMapViewOfSection( mapping, NtCurrentProcess(), &module, 0, 0, NULL, &len,
++    NTSTATUS status;
++    ERR( "XDIAG load_native_dll %s calling NtMapViewOfSection protect=%x (PAGE_EXECUTE_READ=%x)\n",
++         debugstr_us(nt_name), PAGE_EXECUTE_READ, PAGE_EXECUTE_READ );
++    status = NtMapViewOfSection( mapping, NtCurrentProcess(), &module, 0, 0, NULL, &len,
+                                           ViewShare, 0, PAGE_EXECUTE_READ );
++    ERR( "XDIAG load_native_dll %s NtMapViewOfSection returned %x\n", debugstr_us(nt_name), status );
+ 
+     if (!NT_SUCCESS(status)) return status;
+ 
 diff --git a/dlls/ntdll/thread.c b/dlls/ntdll/thread.c
 index 3d1e6e0f..c2676f3f 100644
 --- a/dlls/ntdll/thread.c
@@ -703,7 +721,7 @@ index a7d927a4..0775ebe0 100644
  static NTSTATUS fill_battery_state( SYSTEM_BATTERY_STATE *bs )
  {
 diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
-index 69bc6d16..949b3aea 100644
+index 69bc6d16..440d52fb 100644
 --- a/dlls/ntdll/unix/virtual.c
 +++ b/dlls/ntdll/unix/virtual.c
 @@ -24,6 +24,10 @@
@@ -814,7 +832,15 @@ index 69bc6d16..949b3aea 100644
          {
              ERR( "mmap() error %s, range %p-%p, unix_prot %#x.\n",
                   strerror(errno), start, (char *)start + size, unix_prot );
-@@ -4058,8 +4127,16 @@ TEB *virtual_alloc_first_teb(void)
+@@ -3488,6 +3557,7 @@ static unsigned int virtual_map_section( HANDLE handle, PVOID *addr_ptr, ULONG_P
+     LARGE_INTEGER offset;
+     sigset_t sigset;
+ 
++    ERR( "XDIAG virtual_map_section entered with protect=%x alloc_type=%x\n", protect, alloc_type );
+     switch(protect)
+     {
+     case PAGE_NOACCESS:
+@@ -4058,8 +4128,16 @@ TEB *virtual_alloc_first_teb(void)
          exit(1);
      }
  
