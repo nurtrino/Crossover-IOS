@@ -138,37 +138,44 @@ jobs:
 
       - name: Assemble WineRuntime into the app source tree
         run: |
+          # Ship the runtime as a BUILD-TREE subset under WineRuntime/rt so that,
+          # when the app dlopen's rt/dlls/ntdll/ntdll.so in-process, Wine's
+          # dladdr-based path detection runs in "build_dir" mode and finds the
+          # loader, the arm64 PE DLLs/EXEs, the unix .so libs and the NLS data
+          # exactly as the (proven) simulator run does — no fragile installed-mode
+          # path math.
           RT=CrossoverPad/WineRuntime
-          rm -rf "$RT"; mkdir -p "$RT/lib" "$RT/pe" "$RT/prefix"
-          # --- complete iOS-native unix side: loader + every unixlib + server
-          cp ios-build/loader/wine "$RT/lib/"
-          find ios-build/dlls -name '*.so' -exec cp {} "$RT/lib/" \;
-          cp ios-build/server/wineserver "$RT/lib/"
-          # --- native arm64-Windows PE guest set (DLLs + the console programs),
-          # built by the iOS cross-compile itself — no x86 emulation needed on
-          # an arm64 device.
-          find ios-build/dlls -path '*/aarch64-windows/*.dll' -exec cp {} "$RT/pe/" \;
-          find ios-build/programs -path '*/aarch64-windows/*.exe' -exec cp {} "$RT/pe/" \;
-          # extract the prefix skeleton (registry + directory layout + drives);
-          # tar recreates the internal symlinks. The prefix's own system32 DLLs
-          # are the x86_64 skeleton from the Linux prep — the arm64 guest DLLs
-          # the app actually loads live in pe/ above.
+          rm -rf "$RT"; mkdir -p "$RT/rt/loader" "$RT/rt/server" "$RT/prefix"
+          # unix .so libs (dlls/<name>/<name>.so, incl. dlls/ntdll/ntdll.so) and
+          # the arm64-Windows PE DLLs (dlls/<name>/aarch64-windows/<name>.dll),
+          # copied preserving their build-tree paths.
+          ( cd ios-build && find dlls \( -name '*.so' -o -path '*/aarch64-windows/*.dll' \) -print0 \
+              | tar -cf - --null -T - ) | ( cd "$RT/rt" && tar -xf - )
+          # the console programs (cmd.exe, wineboot.exe, …) as arm64 PE.
+          ( cd ios-build && find programs -path '*/aarch64-windows/*.exe' -print0 \
+              | tar -cf - --null -T - ) | ( cd "$RT/rt" && tar -xf - )
+          cp ios-build/loader/wine     "$RT/rt/loader/"
+          cp ios-build/server/wineserver "$RT/rt/server/"
+          cp -R native/wine/nls        "$RT/rt/nls"
+          # prefix skeleton (registry + drive layout); tar recreates the symlinks.
           tar -C "$RT/prefix" --strip-components=1 -xzf linux-bits/prefix-bundle.tar.gz
           {
-            echo "# WineRuntime bundle assembled $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            echo "unix libs (.so + loader + server): $(ls "$RT/lib" | wc -l)"
-            echo "  incl: $(ls "$RT/lib" | grep -E '^(wine|ntdll.so|win32u.so|wineserver)$' | tr '\n' ' ')"
-            echo "arm64 PE guest (dll+exe): $(ls "$RT/pe" | wc -l)"
-            echo "  cmd.exe: $([ -f "$RT/pe/cmd.exe" ] && echo yes || echo no); wineboot.exe: $([ -f "$RT/pe/wineboot.exe" ] && echo yes || echo no)"
-            echo "prefix:  $([ -f "$RT/prefix/drive_c/windows/system32/kernel32.dll" ] && echo present || echo MISSING)"
+            echo "# WineRuntime (build_dir layout) assembled $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "ntdll.so:   $([ -f "$RT/rt/dlls/ntdll/ntdll.so" ] && echo present || echo MISSING)"
+            echo "unix .so:   $(find "$RT/rt/dlls" -name '*.so' | wc -l)"
+            echo "PE dll:     $(find "$RT/rt/dlls" -path '*/aarch64-windows/*.dll' | wc -l)"
+            echo "PE exe:     $(find "$RT/rt/programs" -path '*/aarch64-windows/*.exe' | wc -l)"
+            echo "cmd.exe:    $([ -f "$RT/rt/programs/cmd/aarch64-windows/cmd.exe" ] && echo yes || echo no)"
+            echo "nls:        $(ls "$RT/rt/nls"/*.nls 2>/dev/null | wc -l)"
+            echo "prefix:     $([ -f "$RT/prefix/drive_c/windows/system32/kernel32.dll" ] && echo present || echo MISSING)"
           } | tee "$RT/MANIFEST.txt"
-          # sanity: the pieces the app probes for / the bootstrap needs
-          test -f "$RT/lib/wine" || { echo "::error::loader missing"; exit 1; }
-          test -f "$RT/lib/ntdll.so" && test -f "$RT/lib/wineserver" || { echo "::error::iOS libs missing"; exit 1; }
-          test -f "$RT/pe/cmd.exe" || { echo "::error::arm64 cmd.exe missing"; exit 1; }
-          test "$(ls "$RT/pe" | wc -l)" -gt 100 || { echo "::error::PE guest set too small"; exit 1; }
+          # hard sanity gates
+          test -f "$RT/rt/dlls/ntdll/ntdll.so" || { echo "::error::ntdll.so missing"; exit 1; }
+          test -f "$RT/rt/programs/cmd/aarch64-windows/cmd.exe" || { echo "::error::cmd.exe missing"; exit 1; }
+          test "$(find "$RT/rt/dlls" -path '*/aarch64-windows/*.dll' | wc -l)" -gt 100 || { echo "::error::PE set too small"; exit 1; }
+          test -f "$RT/rt/nls/locale.nls" || { echo "::error::nls missing"; exit 1; }
           test -f "$RT/prefix/drive_c/windows/system32/kernel32.dll" || { echo "::error::prefix missing"; exit 1; }
-          du -sh "$RT" "$RT"/lib "$RT"/pe "$RT"/prefix
+          du -sh "$RT" "$RT"/rt "$RT"/prefix
 
       - name: Generate Xcode project
         working-directory: CrossoverPad
@@ -187,12 +194,11 @@ jobs:
         working-directory: CrossoverPad
         run: |
           APP=build/CrossoverPad.app
-          test -d "$APP/WineRuntime/lib" || { echo "::error::WineRuntime not embedded"; exit 1; }
-          test -f "$APP/WineRuntime/lib/ntdll.so" || exit 1
+          test -f "$APP/WineRuntime/rt/dlls/ntdll/ntdll.so" || { echo "::error::WineRuntime not embedded"; exit 1; }
+          test -f "$APP/WineRuntime/rt/programs/cmd/aarch64-windows/cmd.exe" || { echo "::error::cmd.exe missing"; exit 1; }
           test -f "$APP/WineRuntime/prefix/drive_c/windows/system32/kernel32.dll" || exit 1
-          echo "embedded libs:"; ls "$APP/WineRuntime/lib"
-          echo "embedded PE DLLs: $(ls "$APP/WineRuntime/pe" | wc -l)"
-          file "$APP/WineRuntime/lib/ntdll.so"
+          echo "embedded PE DLLs: $(find "$APP/WineRuntime/rt/dlls" -path '*/aarch64-windows/*.dll' | wc -l)"
+          file "$APP/WineRuntime/rt/dlls/ntdll/ntdll.so"
           file "$APP/CrossoverPad" | grep -q arm64
 
       - name: Package IPA
@@ -222,11 +228,21 @@ jobs:
         run: |
           URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/CrossoverPad-runtime-unsigned.ipa"
           cat > notes.md <<EOF
-          # CrossoverPad 0.2 Release Alpha — runtime-bearing unsigned IPA
+          # CrossoverPad ${TAG} — in-app CMD console (unsigned IPA)
 
           **Direct download:** ${URL}
 
-          ## A Windows program now runs in the iOS runtime
+          ## New: run cmd.exe from inside the app
+
+          Open a bottle → **Open CMD Console** → you get a live terminal driving
+          \`cmd.exe\` **in-process**: the app dlopen's the embedded \`ntdll.so\` and
+          runs Wine on a background thread (iOS forbids spawning a separate
+          loader), with the guest's stdin/stdout wired to the on-screen console.
+          Type \`ver\`, \`dir\`, \`echo hi\` and see Windows respond. A guest exit no
+          longer kills the app (forkless process-exit routes to pthread_exit).
+          On device this needs JIT — attach **StikDebug**.
+
+          ## A Windows program runs in the iOS runtime
 
           The headline for 0.2: this exact Wine runtime, built for the iOS
           Simulator and driven end-to-end in CI on an Apple-silicon macOS

@@ -42,6 +42,8 @@ targets:
         # increased memory, extended VA). Inert under CODE_SIGNING_ALLOWED=NO
         # in CI; applied when a JIT-capable channel signs the IPA.
         CODE_SIGN_ENTITLEMENTS: CrossoverPad.entitlements
+        # Bridges the in-process Wine host (Sources/WineHost/WineHost.c) to Swift.
+        SWIFT_OBJC_BRIDGING_HEADER: Sources/CrossoverPad-Bridging-Header.h
   CrossoverPadTests:
     type: bundle.unit-test
     platform: iOS

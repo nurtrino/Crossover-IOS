@@ -38,25 +38,33 @@ struct BottleDetailView: View {
                     LabeledContent("Runtime", value: "not embedded")
                 }
             }
-            Section {
-                if bottle.state == .running {
-                    Button("Stop", role: .destructive) {
-                        Task { await store.stop(bottle) }
+            if runtimeReady {
+                Section {
+                    NavigationLink {
+                        ConsoleView(bottle: bottle)
+                    } label: {
+                        Label("Open CMD Console", systemImage: "terminal")
                     }
-                } else {
-                    // Honest label: there is no installer picker yet, and the
-                    // engine cannot launch a guest — this probes the runtime
-                    // and reports the blocker.
+                } footer: {
+                    Text("Runs cmd.exe in-process against the embedded Wine runtime and streams it live. On device this needs JIT — attach StikDebug.")
+                }
+            } else {
+                Section {
                     Button("Attempt Launch (diagnostic)") {
                         Task { await store.run(bottle) }
                     }
                     .disabled(bottle.state == .installing)
+                } footer: {
+                    Text("No Wine runtime is embedded in this build, so there is nothing to run. Install a runtime-bearing IPA.")
                 }
-            } footer: {
-                Text("Guest execution is not working yet. Attempting a run reports the exact blocker above — that is what this build is for. See docs/HANDOFF-M2.md.")
             }
         }
         .navigationTitle(bottle.name)
+    }
+
+    /// The console is offered whenever a complete Wine runtime is embedded.
+    private var runtimeReady: Bool {
+        WineRuntimeBundle.detect()?.isComplete ?? false
     }
 
     /// Probed live, so attaching a JIT-capable debugger (e.g. StikDebug) after

@@ -23,18 +23,30 @@ struct WineRuntimeBundle {
     /// True when every piece needed to attempt launching a guest is present.
     var isComplete: Bool { hasLibraries && hasPEDLLs && hasPrefix }
 
+    /// Layout (build-tree so Wine's dladdr path-detection runs in "build_dir"
+    /// mode and finds everything relative to ntdll.so):
+    ///   WineRuntime/rt/dlls/ntdll/ntdll.so         → build_dir = WineRuntime/rt
+    ///   WineRuntime/rt/dlls/<name>/aarch64-windows/<name>.dll
+    ///   WineRuntime/rt/dlls/<name>/<name>.so
+    ///   WineRuntime/rt/programs/<name>/aarch64-windows/<name>.exe
+    ///   WineRuntime/rt/loader/wine, rt/server/wineserver, rt/nls/*.nls
+    ///   WineRuntime/prefix/…
     static func detect(in bundle: Bundle = .main) -> WineRuntimeBundle? {
         guard let root = bundle.url(forResource: "WineRuntime", withExtension: nil) else {
             return nil
         }
         let fm = FileManager.default
-        let lib = root.appendingPathComponent("lib")
-        let names = (try? fm.contentsOfDirectory(atPath: lib.path)) ?? []
-        let hasLibs = names.contains("ntdll.so") && names.contains("wineserver")
-        let hasPE = directoryHasEntries(fm, root.appendingPathComponent("pe"))
+        let rt = root.appendingPathComponent("rt")
+        let ntdll = rt.appendingPathComponent("dlls/ntdll/ntdll.so")
+        let hasLibs = fm.fileExists(atPath: ntdll.path)
+        let hasPE = fm.fileExists(atPath: rt.appendingPathComponent("dlls/kernel32/aarch64-windows/kernel32.dll").path)
+            || fm.fileExists(atPath: rt.appendingPathComponent("programs/cmd/aarch64-windows/cmd.exe").path)
         let hasPrefix = fm.fileExists(
             atPath: root.appendingPathComponent("prefix/drive_c/windows/system32/kernel32.dll").path
         )
+        // Count the shipped unix libs for the status summary.
+        let soDir = rt.appendingPathComponent("dlls")
+        let names = (try? fm.contentsOfDirectory(atPath: soDir.path)) ?? []
         return WineRuntimeBundle(
             root: root,
             hasLibraries: hasLibs,
