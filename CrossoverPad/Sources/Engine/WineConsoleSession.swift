@@ -46,6 +46,13 @@ final class WineConsoleSession: ObservableObject {
         guard session == nil else { return }
         do {
             let (ntdll, prefix) = try WineConsoleSession.prepareRuntime()
+            // If a previous launch crashed, its fsync'd breadcrumb log tells us
+            // how far the in-process runtime got. Surface it before we retry.
+            let logURL = URL(fileURLWithPath: prefix.path + ".startup.log")
+            if let prior = try? String(contentsOf: logURL, encoding: .utf8),
+               !prior.isEmpty {
+                appendSystem("── previous launch log ──\n\(prior)── end previous log ──\n\n")
+            }
             var inFD: Int32 = -1
             var outFD: Int32 = -1
             guard let s = wine_console_start(ntdll.path, prefix.path, &inFD, &outFD) else {
