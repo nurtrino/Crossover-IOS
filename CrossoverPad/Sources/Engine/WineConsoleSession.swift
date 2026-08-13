@@ -137,8 +137,8 @@ final class WineConsoleSession: ObservableObject {
     private struct RuntimeError: LocalizedError { let msg: String; var errorDescription: String? { msg } }
 
     /// Returns (ntdll.so URL, writable prefix URL), copying the read-only bundled
-    /// prefix into Documents on first use.
-    private static func prepareRuntime() throws -> (path: URL, prefix: URL) {
+    /// prefix into Documents on first use. Shared with `WineGuiSession`.
+    static func prepareRuntime() throws -> (path: URL, prefix: URL) {
         guard let rtRoot = Bundle.main.url(forResource: "WineRuntime", withExtension: nil) else {
             throw RuntimeError(msg: "WineRuntime is not embedded in this build.")
         }

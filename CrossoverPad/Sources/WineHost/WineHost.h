@@ -48,6 +48,23 @@ int wine_console_exit_code(wine_console_session *s);
 /* Release the session. Does not force-kill a live guest; close its stdin first. */
 void wine_console_free(wine_console_session *s);
 
+/*
+ * Start a GUI program (e.g. "notepad.exe") in-process.
+ *
+ * Same in-process model as wine_console_start, but the guest's windows are
+ * presented through the wineios.drv display bridge (WineDisplayHost.h) instead
+ * of a terminal: call wine_display_host_configure() with the screen pixel size
+ * BEFORE this, then poll wine_display_* from the presenter.
+ *
+ * The guest's stdout+stderr stream to *out_log_fd (read it like the console's
+ * stdout pipe); stdin is /dev/null. Lifecycle queries and free are shared with
+ * the console API (wine_console_is_finished / _exit_code / _free).
+ */
+wine_console_session *wine_gui_start(const char *ntdll_so_path,
+                                     const char *prefix_path,
+                                     const char *exe_name,
+                                     int *out_log_fd);
+
 #ifdef __cplusplus
 }
 #endif

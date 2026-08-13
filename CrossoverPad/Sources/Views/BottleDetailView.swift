@@ -45,8 +45,13 @@ struct BottleDetailView: View {
                     } label: {
                         Label("Open CMD Console", systemImage: "terminal")
                     }
+                    NavigationLink {
+                        GuestScreenView(bottle: bottle)
+                    } label: {
+                        Label("Launch Notepad (GUI)", systemImage: "macwindow")
+                    }
                 } footer: {
-                    Text("Runs cmd.exe in-process against the embedded Wine runtime and streams it live. On device this needs JIT — attach StikDebug.")
+                    Text("Both run in-process against the embedded Wine runtime. The GUI screen presents Windows windows through the wineios.drv display driver; touch acts as the mouse. On device this needs JIT — attach StikDebug.")
                 }
             } else {
                 Section {

@@ -12,9 +12,10 @@ map of what needs a Mac.
 | prepared prefix bundle (`make-prefix-bundle.sh`) | Linux | working |
 | 16 KB host-page safety in the fork patches | Linux (audit + `host_page_round`) | done |
 | CrossoverPad app + unsigned IPA | GitHub Actions macOS runner (`.github/workflows/build-ipa.yml`) | working |
-| Wine fork cross-built for iOS (winelib arm64) | needs a Mac + Xcode iOS SDK | **not started — the M2 blocker** |
-| Metal/UIKit display driver (`winemetal.drv` stub) | needs a Mac | not started |
-| TEB register plumbing (arm64 TPIDRRO_EL0 constraints) | needs a Mac/device | not started |
+| Wine fork cross-built for iOS (winelib arm64) | GitHub Actions macOS runner (`wine-ios-probe.yml`) | working |
+| display driver `wineios.drv` (patch 0007) | Linux (`../wineforge/iosdrv_gui_smoke.sh`) + sim CI | **working headless; device presenter untested** |
+| display bridge app side (`WineDisplayHost.c`) | Linux (`host_bridge_test.c`, this dir) | working |
+| TEB register plumbing (arm64 TPIDRRO_EL0 constraints) | needs a Mac/device | see HANDOFF-M2 §2·0 |
 
 ## The prepared prefix bundle
 
