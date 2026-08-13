@@ -4,3 +4,4 @@
 0004-inproc-user-session.patch
 0005-forkless-build.patch
 0006-ios-src.patch
+0007-ios-display-driver.patch

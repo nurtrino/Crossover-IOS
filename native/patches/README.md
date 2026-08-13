@@ -145,6 +145,59 @@ per-process pieces (`init_startup_info`, `winstation_init`,
 `register_desktop_class`) run once per pseudo-process, keyed on the PEB.
 Validated by `m1_notepad_test.sh` (the M1 gate).
 
+### 0007-ios-display-driver.patch
+
+The iOS display driver: `dlls/wineios.drv`, the piece that lets a GUI
+Windows program present a window on iOS (docs/DISPLAY-DRIVER.md is the
+design handoff this implements). Named `wineios.drv` — not the handoff's
+placeholder `winendrv` — because explorer composes the module name as
+`wine<name>.drv` from the `Graphics` registry value, so the driver's
+selection name is simply `ios`.
+
+Architecture (the handoff's recommended split, taken further): the driver's
+unix side is **pure C with zero UIKit/Metal linkage**. All presentation
+lives in the embedding app; the two meet through a dlsym'd host bridge
+(`wineios_host.h`, twin copy in `CrossoverPad/Sources/WineHost/`):
+
+- **`dlls/wineios.drv/`** (new): `dllmain.c` (PE half; `DllMain` calls the
+  unixlib init and starts the input-pump guest thread),
+  `iosdrv_main.c` (vtable registration via `__wine_set_user_driver`, host
+  bridge resolution with `dlsym(RTLD_DEFAULT, "wineios_host_get")`, input
+  injection via `NtUserSendHardwareInput` on a Wine thread), `display.c`
+  (`pUpdateDisplayDevices`: one monitor at the host-reported — or
+  `WINEIOS_SCREEN` — pixel size), `window.c` (per-window data;
+  `window_surface` whose `flush()` copies the dirty rect into a stable
+  BGRA buffer the app presenter reads under a lock). Everything not
+  implemented falls back to win32u's nulldrv.
+- **`configure.ac`**: `enable_wineios_drv=yes` inside the existing iOS
+  branch (0006), default `no` elsewhere (`--enable-wineios-drv` opts in on
+  any host — the driver is platform-independent C, which is how it is
+  compile-tested and smoke-tested on Linux).
+- **`programs/explorer/desktop.c`**: default driver list gains a trailing
+  `,ios`, so an iOS runtime (where mac/x11/wayland don't exist) selects the
+  driver with zero registry configuration; desktop platforms never reach it.
+
+Headless mode is a feature, not a fallback: with no host bridge present the
+driver still runs, and `WINEIOS_SURFACE_DUMP=<dir>` makes every flush write
+the surface as a BMP plus a `wineios: FLUSH ... checksum=` marker — that is
+the CI/Linux validation path (`native/wineforge/iosdrv_gui_smoke.sh`, and
+the GUI smoke in `wine-ios-sim-run.yml`).
+
+Threading contract (see the header comments in `wineios_host.h`): host
+callbacks run on Wine threads and must not block on the app main thread;
+the driver never calls a host callback while holding a surface pixel lock;
+input is enqueued by UIKit handlers and injected by a dedicated Wine guest
+thread (win32u must never be entered from the app main thread).
+
+**Known pre-existing issue (not 0007):** on this stack a `CW_USEDEFAULT`
+top-level window gets a bogus ~6750424×6750327 rect (its surface is
+correctly clipped to the screen, but nonclient painting inherits the huge
+geometry). Reproduces byte-for-byte with Wine's built-in `null` driver on
+the same build (`Graphics=null`), display metrics/DPI/work-area all probe
+correct (1024×768@96dpi), so it sits in win32u's default-placement path
+interacting with the fork — filed here so the next debugging session
+starts at `fix_cs_coordinates`/`map_dpi_create_struct`, not at the driver.
+
 ### Regenerating a patch — read this first
 
 Patches are sequential diffs against the *evolving* tree, so a patch must be

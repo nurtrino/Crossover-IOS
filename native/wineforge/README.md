@@ -15,6 +15,13 @@ make -j"$(nproc)"
 cd ../wineforge && make test
 ```
 
+Display-driver gate (patch 0007): `./iosdrv_gui_smoke.sh` runs `notepad.exe`
+completely headless against `wineios.drv` and asserts the driver created a
+window surface, received pixel flushes, and dumped non-black BMPs
+(`WINEIOS_SURFACE_DUMP`). Needs a build configured with
+`--without-x --enable-wineios-drv` (no other display driver present); point
+`WINEFORGE_BUILD` at it if it is not `../wine-build`.
+
 Two build knobs matter for what the suite can prove:
 
 - **`--without-mingw` builds Wine's DLLs as host `.so` files.** `dlopen`

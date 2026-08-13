@@ -1,0 +1,1232 @@
+diff --git a/configure.ac b/configure.ac
+index a5e5a8de..b8b74faf 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -930,7 +930,7 @@ case $host_os in
+     dnl via TargetConditionals. On iOS the AppKit-based winemac driver and
+     dnl several macOS-only frameworks (AppKit, DiskArbitration, IOKit-as-
+     dnl framework, ApplicationServices, CoreServices) do not exist; blank them
+-    dnl and disable winemac_drv. The Metal/UIKit display driver is future work.
++    dnl and disable winemac_drv (its replacement is wineios.drv, patch 0007).
+     AC_CACHE_CHECK([whether we are building for iOS],[wine_cv_target_ios],
+       [AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[#include <TargetConditionals.h>
+ #if !TARGET_OS_IPHONE
+@@ -939,6 +939,11 @@ case $host_os in
+     if test "x$wine_cv_target_ios" = xyes
+     then
+         enable_winemac_drv=${enable_winemac_drv:-no}
++        dnl Crossover-IOS fork, patch 0007: the UIKit-hosted display driver.
++        dnl wineios.drv is the iOS replacement for winemac.drv: a pure-C
++        dnl unixlib that presents through the embedding app (dlsym host
++        dnl bridge), so it needs no frameworks of its own.
++        enable_wineios_drv=${enable_wineios_drv:-yes}
+         dnl PCSC is a macOS-only framework; with pcsclite absent configure
+         dnl auto-disables the winscard module (WINE_NOTICE_WITH below), which
+         dnl is exactly right for iOS.
+@@ -1120,6 +1125,7 @@ esac
+ enable_winecoreaudio_drv=${enable_winecoreaudio_drv:-no}
+ enable_wineandroid_drv=${enable_wineandroid_drv:-no}
+ enable_winemac_drv=${enable_winemac_drv:-no}
++enable_wineios_drv=${enable_wineios_drv:-no}
+ 
+ dnl **** External libraries ****
+ 
+@@ -3411,6 +3417,7 @@ WINE_CONFIG_MAKEFILE(dlls/wined3d)
+ WINE_CONFIG_MAKEFILE(dlls/winedmo)
+ WINE_CONFIG_MAKEFILE(dlls/winegstreamer)
+ WINE_CONFIG_MAKEFILE(dlls/winehid.sys)
++WINE_CONFIG_MAKEFILE(dlls/wineios.drv)
+ WINE_CONFIG_MAKEFILE(dlls/winemac.drv)
+ WINE_CONFIG_MAKEFILE(dlls/winemapi)
+ WINE_CONFIG_MAKEFILE(dlls/wineoss.drv)
+diff --git a/dlls/wineios.drv/Makefile.in b/dlls/wineios.drv/Makefile.in
+new file mode 100644
+index 00000000..f557ba04
+--- /dev/null
++++ b/dlls/wineios.drv/Makefile.in
+@@ -0,0 +1,10 @@
++MODULE = wineios.drv
++UNIXLIB = wineios.so
++UNIX_LIBS = -lwin32u $(PTHREAD_LIBS)
++IMPORTS = user32 win32u
++
++SOURCES = \
++	display.c \
++	dllmain.c \
++	iosdrv_main.c \
++	window.c
+diff --git a/dlls/wineios.drv/display.c b/dlls/wineios.drv/display.c
+new file mode 100644
+index 00000000..2a6fb41b
+--- /dev/null
++++ b/dlls/wineios.drv/display.c
+@@ -0,0 +1,76 @@
++/*
++ * wineios.drv display device reporting
++ *
++ * Copyright 2026 the Crossover-IOS project
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ */
++
++#if 0
++#pragma makedep unix
++#endif
++
++#include "config.h"
++
++#include "ntstatus.h"
++#define WIN32_NO_STATUS
++
++#include "iosdrv.h"
++#include "ntuser.h"
++
++#include "wine/debug.h"
++
++WINE_DEFAULT_DEBUG_CHANNEL(iosdrv);
++
++/***********************************************************************
++ *      UpdateDisplayDevices (IOSDRV.@)
++ *
++ * One GPU, one source, one monitor, one fixed mode: the iOS screen at
++ * native pixel resolution (or the headless default). The device can't
++ * change modes; ChangeDisplaySettings stays on the nulldrv success path.
++ */
++UINT IOSDRV_UpdateDisplayDevices(const struct gdi_device_manager *device_manager, void *param)
++{
++    struct pci_id pci_id = {0};
++    struct gdi_monitor monitor = {0};
++    DEVMODEW mode =
++    {
++        .dmSize = sizeof(mode),
++        .dmFields = DM_DISPLAYORIENTATION | DM_BITSPERPEL | DM_PELSWIDTH | DM_PELSHEIGHT |
++                    DM_DISPLAYFLAGS | DM_DISPLAYFREQUENCY | DM_POSITION,
++        .dmBitsPerPel = 32,
++        .dmDisplayFrequency = 60,
++    };
++    RECT screen = iosdrv_screen_rect();
++    UINT dpi = NtUserGetSystemDpiForProcess(NULL);
++
++    TRACE("screen %s\n", wine_dbgstr_rect(&screen));
++
++    device_manager->add_gpu("iOS Screen", &pci_id, NULL, param);
++    device_manager->add_source("iOS", DISPLAY_DEVICE_ATTACHED_TO_DESKTOP | DISPLAY_DEVICE_PRIMARY_DEVICE,
++                               dpi, param);
++
++    monitor.rc_monitor = screen;
++    monitor.rc_work = screen;
++    device_manager->add_monitor(&monitor, param);
++
++    mode.dmPelsWidth = screen.right - screen.left;
++    mode.dmPelsHeight = screen.bottom - screen.top;
++    mode.dmPosition.x = 0;
++    mode.dmPosition.y = 0;
++    device_manager->add_modes(&mode, 1, &mode, param);
++
++    return STATUS_SUCCESS;
++}
+diff --git a/dlls/wineios.drv/dllmain.c b/dlls/wineios.drv/dllmain.c
+new file mode 100644
+index 00000000..94f3f214
+--- /dev/null
++++ b/dlls/wineios.drv/dllmain.c
+@@ -0,0 +1,53 @@
++/*
++ * wineios.drv entry points
++ *
++ * Copyright 2026 the Crossover-IOS project
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ */
++
++#include "iosdrv_dll.h"
++
++#include "wine/debug.h"
++
++WINE_DEFAULT_DEBUG_CHANNEL(iosdrv);
++
++/* Drains the host application's input queue and injects it as hardware
++ * input. This must run on a Wine guest thread (never the app main thread),
++ * so it lives here: a plain Windows thread that blocks in the unixlib.
++ * Returns when there is no host bridge (headless) or the host asks to stop. */
++static DWORD WINAPI iosdrv_input_thread(void *arg)
++{
++    IOSDRV_UNIX_CALL(run_input_loop, NULL);
++    TRACE("input loop finished\n");
++    return 0;
++}
++
++BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, void *reserved)
++{
++    DWORD tid;
++
++    if (reason != DLL_PROCESS_ATTACH) return TRUE;
++
++    DisableThreadLibraryCalls(instance);
++    if (__wine_init_unix_call()) return FALSE;
++
++    if (IOSDRV_UNIX_CALL(init, NULL))
++        return FALSE;
++
++    CloseHandle(CreateThread(NULL, 0, iosdrv_input_thread, NULL, 0, &tid));
++
++    return TRUE;
++}
+diff --git a/dlls/wineios.drv/iosdrv.h b/dlls/wineios.drv/iosdrv.h
+new file mode 100644
+index 00000000..c9693b7c
+--- /dev/null
++++ b/dlls/wineios.drv/iosdrv.h
+@@ -0,0 +1,80 @@
++/*
++ * wineios.drv unix-side private definitions
++ *
++ * Copyright 2026 the Crossover-IOS project
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ */
++
++#ifndef __WINE_IOSDRV_H
++#define __WINE_IOSDRV_H
++
++#ifndef WINE_UNIX_LIB
++#error This file can only be used on the Unix side
++#endif
++
++#include <pthread.h>
++#include <stdint.h>
++
++#include "windef.h"
++#include "winbase.h"
++#include "ntgdi.h"
++#include "wine/gdi_driver.h"
++#include "wine/unixlib.h"
++
++#include "wineios_host.h"
++
++/* One process-wide bridge to the embedding app; NULL when headless.
++ * The unixlib is dlopen'ed once per host process and shared by every
++ * pseudo-process, so this state is host-wide by construction. */
++extern const struct wineios_host *iosdrv_host;
++
++/* The screen rectangle the Windows desktop runs at, in pixels, origin 0,0. */
++extern RECT iosdrv_screen_rect(void);
++
++/* Directory to dump surface BMPs into on flush (WINEIOS_SURFACE_DUMP), or
++ * NULL. Headless CI uses this to prove end-to-end pixel flow. */
++extern const char *iosdrv_dump_dir;
++
++static inline BOOL intersect_rect(RECT *dst, const RECT *src1, const RECT *src2)
++{
++    dst->left = max(src1->left, src2->left);
++    dst->top = max(src1->top, src2->top);
++    dst->right = min(src1->right, src2->right);
++    dst->bottom = min(src1->bottom, src2->bottom);
++    return !IsRectEmpty(dst);
++}
++
++/* window.c */
++extern void iosdrv_init_window(void);
++extern HWND iosdrv_hwnd_from_surface_id(uint64_t id);
++
++/* driver entry points (window.c) */
++extern BOOL IOSDRV_WindowPosChanging(HWND hwnd, UINT swp_flags, BOOL shaped,
++                                     const struct window_rects *rects);
++extern void IOSDRV_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint,
++                                    UINT swp_flags, const struct window_rects *new_rects,
++                                    struct window_surface *surface);
++extern BOOL IOSDRV_CreateWindowSurface(HWND hwnd, BOOL layered, const RECT *surface_rect,
++                                       struct window_surface **surface);
++extern void IOSDRV_DestroyWindow(HWND hwnd);
++extern LRESULT IOSDRV_DesktopWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
++extern void IOSDRV_SetWindowText(HWND hwnd, LPCWSTR text);
++
++/* driver entry points (display.c) */
++extern UINT IOSDRV_UpdateDisplayDevices(const struct gdi_device_manager *device_manager,
++                                        void *param);
++
++#endif /* __WINE_IOSDRV_H */
+diff --git a/dlls/wineios.drv/iosdrv_dll.h b/dlls/wineios.drv/iosdrv_dll.h
+new file mode 100644
+index 00000000..ba874362
+--- /dev/null
++++ b/dlls/wineios.drv/iosdrv_dll.h
+@@ -0,0 +1,32 @@
++/*
++ * wineios.drv PE-side definitions
++ *
++ * Copyright 2026 the Crossover-IOS project
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ */
++
++#ifndef __WINE_IOSDRV_DLL_H
++#define __WINE_IOSDRV_DLL_H
++
++#include <stdarg.h>
++#include "windef.h"
++#include "winbase.h"
++
++#include "unixlib.h"
++
++#define IOSDRV_UNIX_CALL(func, params) WINE_UNIX_CALL(iosdrv_unix_func_ ## func, params)
++
++#endif /* __WINE_IOSDRV_DLL_H */
+diff --git a/dlls/wineios.drv/iosdrv_main.c b/dlls/wineios.drv/iosdrv_main.c
+new file mode 100644
+index 00000000..4821e5bf
+--- /dev/null
++++ b/dlls/wineios.drv/iosdrv_main.c
+@@ -0,0 +1,235 @@
++/*
++ * wineios.drv initialization and input pump
++ *
++ * Copyright 2026 the Crossover-IOS project
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ */
++
++#if 0
++#pragma makedep unix
++#endif
++
++#include "config.h"
++
++#include <dlfcn.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "ntstatus.h"
++#define WIN32_NO_STATUS
++
++#include "iosdrv.h"
++#include "unixlib.h"
++#include "ntuser.h"
++
++#include "wine/debug.h"
++
++WINE_DEFAULT_DEBUG_CHANNEL(iosdrv);
++
++const struct wineios_host *iosdrv_host = NULL;
++const char *iosdrv_dump_dir = NULL;
++
++static RECT screen_rect = { 0, 0, 1024, 768 };  /* headless default */
++
++RECT iosdrv_screen_rect(void)
++{
++    return screen_rect;
++}
++
++static const struct user_driver_funcs iosdrv_funcs =
++{
++    .pUpdateDisplayDevices = IOSDRV_UpdateDisplayDevices,
++    .pWindowPosChanging = IOSDRV_WindowPosChanging,
++    .pWindowPosChanged = IOSDRV_WindowPosChanged,
++    .pCreateWindowSurface = IOSDRV_CreateWindowSurface,
++    .pDestroyWindow = IOSDRV_DestroyWindow,
++    .pDesktopWindowProc = IOSDRV_DesktopWindowProc,
++    .pSetWindowText = IOSDRV_SetWindowText,
++};
++
++/* Host-wide one-time setup: resolve the app's presenter bridge and the
++ * desktop size. Multiple pseudo-processes load the driver in one host
++ * process; only the first does this work. */
++static pthread_once_t init_once = PTHREAD_ONCE_INIT;
++
++static void iosdrv_init_once(void)
++{
++    wineios_host_get_fn host_get;
++    const char *env;
++    uint32_t w, h;
++
++    if ((host_get = (wineios_host_get_fn)dlsym(RTLD_DEFAULT, WINEIOS_HOST_ENTRY)))
++    {
++        const struct wineios_host *host = host_get();
++        if (host && host->abi_version != WINEIOS_HOST_ABI_VERSION)
++        {
++            ERR("host bridge ABI mismatch: host %u, driver %u — running headless\n",
++                host->abi_version, WINEIOS_HOST_ABI_VERSION);
++            host = NULL;
++        }
++        iosdrv_host = host;
++    }
++
++    /* WINEIOS_SCREEN=WxH overrides everything (CI harness); otherwise the
++     * host app reports UIScreen.nativeBounds; otherwise keep the default. */
++    if ((env = getenv("WINEIOS_SCREEN")))
++    {
++        unsigned int ew, eh;
++        if (sscanf(env, "%ux%u", &ew, &eh) == 2 && ew && eh)
++            SetRect(&screen_rect, 0, 0, ew, eh);
++        else
++            ERR("ignoring malformed WINEIOS_SCREEN=%s\n", env);
++    }
++    else if (iosdrv_host && iosdrv_host->screen_size &&
++             iosdrv_host->screen_size(iosdrv_host->ctx, &w, &h) && w && h)
++    {
++        SetRect(&screen_rect, 0, 0, w, h);
++    }
++
++    if ((env = getenv("WINEIOS_SURFACE_DUMP")) && env[0])
++        iosdrv_dump_dir = strdup(env);
++
++    iosdrv_init_window();
++
++    TRACE("host bridge %s, screen %s, dump %s\n", iosdrv_host ? "present" : "absent (headless)",
++          wine_dbgstr_rect(&screen_rect), debugstr_a(iosdrv_dump_dir));
++}
++
++static NTSTATUS iosdrv_unix_init(void *arg)
++{
++    pthread_once(&init_once, iosdrv_init_once);
++
++    /* Registered per pseudo-process load; win32u keeps one host-wide table,
++     * so re-registering the same vtable is idempotent. */
++    __wine_set_user_driver(&iosdrv_funcs, WINE_GDI_DRIVER_VERSION);
++    return STATUS_SUCCESS;
++}
++
++/***********************************************************************
++ * Input pump
++ *
++ * Touch/keyboard events flow: UIKit (app main thread) -> host queue ->
++ * this loop (a dedicated Wine guest thread, so NtUser* is legal) ->
++ * NtUserSendHardwareInput -> the guest's message queue.
++ */
++
++static LONG input_loop_claimed;  /* every GUI process starts a pump thread; only one may drain */
++
++static HWND event_target(const struct wineios_event *ev)
++{
++    HWND hwnd = 0;
++    if (ev->surface_id) hwnd = iosdrv_hwnd_from_surface_id(ev->surface_id);
++    if (!hwnd) hwnd = NtUserGetForegroundWindow();
++    return hwnd;
++}
++
++static void inject_event(const struct wineios_event *ev)
++{
++    INPUT input = {0};
++    HWND hwnd = event_target(ev);
++
++    switch (ev->type)
++    {
++    case WINEIOS_EVENT_MOUSE_MOVE:
++        input.type = INPUT_MOUSE;
++        input.mi.dx = ev->x;
++        input.mi.dy = ev->y;
++        input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
++        break;
++    case WINEIOS_EVENT_MOUSE_BUTTON:
++        input.type = INPUT_MOUSE;
++        input.mi.dx = ev->x;
++        input.mi.dy = ev->y;
++        input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
++        switch (ev->button)
++        {
++        case WINEIOS_BUTTON_RIGHT:
++            input.mi.dwFlags |= ev->down ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_RIGHTUP;
++            break;
++        case WINEIOS_BUTTON_MIDDLE:
++            input.mi.dwFlags |= ev->down ? MOUSEEVENTF_MIDDLEDOWN : MOUSEEVENTF_MIDDLEUP;
++            break;
++        default:
++            input.mi.dwFlags |= ev->down ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP;
++            break;
++        }
++        break;
++    case WINEIOS_EVENT_MOUSE_WHEEL:
++        input.type = INPUT_MOUSE;
++        input.mi.dx = ev->x;
++        input.mi.dy = ev->y;
++        input.mi.mouseData = ev->wheel;
++        input.mi.dwFlags = MOUSEEVENTF_WHEEL;
++        break;
++    case WINEIOS_EVENT_KEY:
++        input.type = INPUT_KEYBOARD;
++        input.ki.wVk = ev->vk;
++        input.ki.dwFlags = ev->down ? 0 : KEYEVENTF_KEYUP;
++        break;
++    case WINEIOS_EVENT_CHAR:
++        input.type = INPUT_KEYBOARD;
++        input.ki.wScan = ev->ch;
++        input.ki.dwFlags = KEYEVENTF_UNICODE;
++        NtUserSendHardwareInput(hwnd, 0, &input, 0);
++        input.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
++        break;
++    default:
++        WARN("unknown event type %u\n", ev->type);
++        return;
++    }
++
++    TRACE("type %u hwnd %p pos %d,%d\n", ev->type, hwnd, ev->x, ev->y);
++    NtUserSendHardwareInput(hwnd, 0, &input, 0);
++}
++
++static NTSTATUS iosdrv_unix_run_input_loop(void *arg)
++{
++    if (!iosdrv_host || !iosdrv_host->next_event) return STATUS_SUCCESS;  /* headless */
++    if (InterlockedCompareExchange(&input_loop_claimed, 1, 0)) return STATUS_SUCCESS;
++
++    TRACE("input loop running\n");
++    for (;;)
++    {
++        struct wineios_event ev;
++        int ret = iosdrv_host->next_event(iosdrv_host->ctx, &ev, 500);
++        if (ret < 0) break;
++        if (ret > 0) inject_event(&ev);
++    }
++
++    InterlockedExchange(&input_loop_claimed, 0);
++    return STATUS_SUCCESS;
++}
++
++const unixlib_entry_t __wine_unix_call_funcs[] =
++{
++    iosdrv_unix_init,
++    iosdrv_unix_run_input_loop,
++};
++
++C_ASSERT(ARRAYSIZE(__wine_unix_call_funcs) == iosdrv_unix_func_count);
++
++#ifdef _WIN64
++
++const unixlib_entry_t __wine_unix_call_wow64_funcs[] =
++{
++    iosdrv_unix_init,
++    iosdrv_unix_run_input_loop,
++};
++
++C_ASSERT(ARRAYSIZE(__wine_unix_call_wow64_funcs) == iosdrv_unix_func_count);
++
++#endif /* _WIN64 */
+diff --git a/dlls/wineios.drv/unixlib.h b/dlls/wineios.drv/unixlib.h
+new file mode 100644
+index 00000000..999cd229
+--- /dev/null
++++ b/dlls/wineios.drv/unixlib.h
+@@ -0,0 +1,35 @@
++/*
++ * wineios.drv unixlib interface
++ *
++ * Copyright 2026 the Crossover-IOS project
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ */
++
++#ifndef __WINE_IOSDRV_UNIXLIB_H
++#define __WINE_IOSDRV_UNIXLIB_H
++
++#include <stdarg.h>
++#include "winternl.h"
++#include "wine/unixlib.h"
++
++enum iosdrv_unix_func
++{
++    iosdrv_unix_func_init,
++    iosdrv_unix_func_run_input_loop,
++    iosdrv_unix_func_count,
++};
++
++#endif /* __WINE_IOSDRV_UNIXLIB_H */
+diff --git a/dlls/wineios.drv/window.c b/dlls/wineios.drv/window.c
+new file mode 100644
+index 00000000..c8b0d0cf
+--- /dev/null
++++ b/dlls/wineios.drv/window.c
+@@ -0,0 +1,457 @@
++/*
++ * wineios.drv window handling and window surfaces
++ *
++ * Copyright 2026 the Crossover-IOS project
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ */
++
++#if 0
++#pragma makedep unix
++#endif
++
++#include "config.h"
++
++#include <assert.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "ntstatus.h"
++#define WIN32_NO_STATUS
++
++#include "iosdrv.h"
++#include "ntuser.h"
++
++#include "wine/debug.h"
++#include "wine/list.h"
++#include "wine/rbtree.h"
++
++WINE_DEFAULT_DEBUG_CHANNEL(iosdrv);
++
++/***********************************************************************
++ * per-window driver data
++ */
++
++struct ios_win_data
++{
++    struct rb_entry entry;      /* in win_data_rb, sorted by hwnd */
++    HWND hwnd;
++    struct window_rects rects;  /* window/client/visible, virtual-desktop coords */
++    uint64_t surface_id;        /* current surface, 0 if none */
++};
++
++static int ios_win_data_cmp_rb(const void *key, const struct rb_entry *entry)
++{
++    HWND key_hwnd = (HWND)key;
++    const struct ios_win_data *data = RB_ENTRY_VALUE(entry, const struct ios_win_data, entry);
++
++    if (key_hwnd < data->hwnd) return -1;
++    if (key_hwnd > data->hwnd) return 1;
++    return 0;
++}
++
++static pthread_mutex_t win_data_mutex = PTHREAD_MUTEX_INITIALIZER;
++static struct rb_tree win_data_rb = { ios_win_data_cmp_rb };
++
++/* Create win data for a top-level window (child of the desktop). Desktop and
++ * HWND_MESSAGE windows get none and fall through to default surfaces. */
++static struct ios_win_data *ios_win_data_create(HWND hwnd, const struct window_rects *rects)
++{
++    struct ios_win_data *data;
++    struct rb_entry *rb_entry;
++    HWND parent;
++
++    if (!(parent = NtUserGetAncestor(hwnd, GA_PARENT))) return NULL;
++    if (parent != NtUserGetDesktopWindow() && !NtUserGetAncestor(parent, GA_PARENT))
++        return NULL;
++
++    if (!(data = calloc(1, sizeof(*data)))) return NULL;
++
++    data->hwnd = hwnd;
++    data->rects = *rects;
++
++    pthread_mutex_lock(&win_data_mutex);
++
++    if ((rb_entry = rb_get(&win_data_rb, hwnd)))
++    {
++        free(data);
++        return RB_ENTRY_VALUE(rb_entry, struct ios_win_data, entry);
++    }
++
++    rb_put(&win_data_rb, hwnd, &data->entry);
++
++    TRACE("hwnd=%p\n", data->hwnd);
++
++    return data;
++}
++
++/* Lock and return the data for a window, or NULL. */
++static struct ios_win_data *ios_win_data_get(HWND hwnd)
++{
++    struct rb_entry *rb_entry;
++
++    pthread_mutex_lock(&win_data_mutex);
++    if ((rb_entry = rb_get(&win_data_rb, hwnd)))
++        return RB_ENTRY_VALUE(rb_entry, struct ios_win_data, entry);
++    pthread_mutex_unlock(&win_data_mutex);
++
++    return NULL;
++}
++
++static void ios_win_data_release(struct ios_win_data *data)
++{
++    assert(data);
++    pthread_mutex_unlock(&win_data_mutex);
++}
++
++void iosdrv_init_window(void)
++{
++    /* nothing yet; kept as the one-time hook for window state */
++}
++
++/***********************************************************************
++ * window surface
++ *
++ * win32u owns the DIB the guest paints into; flush() hands us the bits.
++ * We keep a stable BGRA copy (host_bits) that the app presenter reads
++ * under host_mutex, and tell the host which rect changed.
++ */
++
++struct ios_window_surface
++{
++    struct window_surface header;
++    uint64_t id;
++    void *host_bits;            /* BGRA8888 top-down, forced-opaque */
++    uint32_t width, height, stride;
++    pthread_mutex_t host_mutex; /* guards host_bits between driver and presenter */
++    unsigned int flush_count;
++    struct list entry;          /* in surface_list, for id -> hwnd lookup */
++};
++
++static pthread_mutex_t surface_list_mutex = PTHREAD_MUTEX_INITIALIZER;
++static struct list surface_list = LIST_INIT(surface_list);
++static uint64_t next_surface_id = 1;
++
++static struct ios_window_surface *ios_window_surface_cast(struct window_surface *window_surface)
++{
++    return (struct ios_window_surface *)window_surface;
++}
++
++HWND iosdrv_hwnd_from_surface_id(uint64_t id)
++{
++    struct ios_window_surface *surface;
++    HWND hwnd = 0;
++
++    pthread_mutex_lock(&surface_list_mutex);
++    LIST_FOR_EACH_ENTRY(surface, &surface_list, struct ios_window_surface, entry)
++    {
++        if (surface->id == id)
++        {
++            hwnd = surface->header.hwnd;
++            break;
++        }
++    }
++    pthread_mutex_unlock(&surface_list_mutex);
++
++    return hwnd;
++}
++
++static void ios_surface_lock(void *lock_ctx)
++{
++    struct ios_window_surface *surface = lock_ctx;
++    pthread_mutex_lock(&surface->host_mutex);
++}
++
++static void ios_surface_unlock(void *lock_ctx)
++{
++    struct ios_window_surface *surface = lock_ctx;
++    pthread_mutex_unlock(&surface->host_mutex);
++}
++
++static void ios_window_surface_set_clip(struct window_surface *window_surface,
++                                        const RECT *rects, UINT count)
++{
++    /* v1 shows whole opaque windows; clipping is a later milestone */
++}
++
++/* Dump the surface as a bottom-up 32bpp BMP, for the headless CI harness. */
++static void dump_surface_bmp(struct ios_window_surface *surface)
++{
++    char path[512];
++    unsigned char hdr[54];
++    uint32_t image_size = surface->stride * surface->height;
++    uint32_t file_size = sizeof(hdr) + image_size;
++    FILE *f;
++    int y;
++
++    snprintf(path, sizeof(path), "%s/surface-%llu.bmp", iosdrv_dump_dir,
++             (unsigned long long)surface->id);
++    if (!(f = fopen(path, "wb"))) return;
++
++    memset(hdr, 0, sizeof(hdr));
++    hdr[0] = 'B'; hdr[1] = 'M';
++    memcpy(hdr + 2, &file_size, 4);
++    hdr[10] = 54;                       /* pixel data offset */
++    hdr[14] = 40;                       /* BITMAPINFOHEADER size */
++    memcpy(hdr + 18, &surface->width, 4);
++    memcpy(hdr + 22, &surface->height, 4);
++    hdr[26] = 1;                        /* planes */
++    hdr[28] = 32;                       /* bpp */
++    memcpy(hdr + 34, &image_size, 4);
++    fwrite(hdr, 1, sizeof(hdr), f);
++    for (y = surface->height - 1; y >= 0; y--)  /* top-down buffer -> bottom-up BMP */
++        fwrite((char *)surface->host_bits + y * surface->stride, 1, surface->stride, f);
++    fclose(f);
++}
++
++static BOOL ios_window_surface_flush(struct window_surface *window_surface, const RECT *rect,
++                                     const RECT *dirty, const BITMAPINFO *color_info,
++                                     const void *color_bits, BOOL shape_changed,
++                                     const BITMAPINFO *shape_info, const void *shape_bits)
++{
++    struct ios_window_surface *surface = ios_window_surface_cast(window_surface);
++    uint32_t src_stride = color_info->bmiHeader.biWidth * 4;
++    RECT bounds = { 0, 0, surface->width, surface->height };
++    RECT damage;
++    int y;
++
++    if (!intersect_rect(&damage, dirty, &bounds)) return TRUE;
++
++    if (iosdrv_dump_dir)  /* source geometry, for correlating CI dumps */
++        fprintf(stderr, "wineios: SRC biWidth=%d biHeight=%d sizeimage=%u rect=%d,%d-%d,%d\n",
++                (int)color_info->bmiHeader.biWidth, (int)color_info->bmiHeader.biHeight,
++                (unsigned)color_info->bmiHeader.biSizeImage,
++                (int)rect->left, (int)rect->top, (int)rect->right, (int)rect->bottom);
++
++    pthread_mutex_lock(&surface->host_mutex);
++    for (y = damage.top; y < damage.bottom; y++)
++    {
++        const uint32_t *src = (const uint32_t *)((const char *)color_bits + y * src_stride) + damage.left;
++        uint32_t *dst = (uint32_t *)((char *)surface->host_bits + y * surface->stride) + damage.left;
++        int x, width = damage.right - damage.left;
++
++        /* GDI writes XRGB with 0 alpha; the presenter composites BGRA */
++        for (x = 0; x < width; x++) dst[x] = src[x] | 0xff000000u;
++    }
++    surface->flush_count++;
++    pthread_mutex_unlock(&surface->host_mutex);
++
++    TRACE("id %llu hwnd %p dirty %s flush #%u\n", (unsigned long long)surface->id,
++          window_surface->hwnd, wine_dbgstr_rect(&damage), surface->flush_count);
++
++    if (iosdrv_host && iosdrv_host->surface_updated)
++        iosdrv_host->surface_updated(iosdrv_host->ctx, surface->id,
++                                     damage.left, damage.top, damage.right, damage.bottom);
++
++    if (iosdrv_dump_dir)
++    {
++        uint32_t checksum = 0, npx = surface->width * surface->height;
++        const uint32_t *px = surface->host_bits;
++        uint32_t i;
++
++        pthread_mutex_lock(&surface->host_mutex);
++        for (i = 0; i < npx; i++) checksum = checksum * 31 + px[i];
++        dump_surface_bmp(surface);
++        pthread_mutex_unlock(&surface->host_mutex);
++        fprintf(stderr, "wineios: FLUSH id=%llu hwnd=%p size=%ux%u dirty=%d,%d-%d,%d checksum=%08x\n",
++                (unsigned long long)surface->id, window_surface->hwnd,
++                surface->width, surface->height,
++                (int)damage.left, (int)damage.top, (int)damage.right, (int)damage.bottom,
++                checksum);
++    }
++
++    return TRUE;
++}
++
++static void ios_window_surface_destroy(struct window_surface *window_surface)
++{
++    struct ios_window_surface *surface = ios_window_surface_cast(window_surface);
++
++    TRACE("id %llu hwnd %p\n", (unsigned long long)surface->id, window_surface->hwnd);
++
++    /* After surface_removed returns the host holds no reference to bits or
++     * the lock (that is the contract), so teardown is safe. */
++    if (iosdrv_host && iosdrv_host->surface_removed)
++        iosdrv_host->surface_removed(iosdrv_host->ctx, surface->id);
++
++    pthread_mutex_lock(&surface_list_mutex);
++    list_remove(&surface->entry);
++    pthread_mutex_unlock(&surface_list_mutex);
++
++    pthread_mutex_destroy(&surface->host_mutex);
++    free(surface->host_bits);
++}
++
++static const struct window_surface_funcs ios_window_surface_funcs =
++{
++    ios_window_surface_set_clip,
++    ios_window_surface_flush,
++    ios_window_surface_destroy
++};
++
++static struct window_surface *ios_window_surface_create(HWND hwnd, const RECT *rect)
++{
++    char buffer[FIELD_OFFSET(BITMAPINFO, bmiColors[256])];
++    BITMAPINFO *info = (BITMAPINFO *)buffer;
++    struct window_surface *window_surface;
++    int width = rect->right - rect->left;
++    int height = rect->bottom - rect->top;
++
++    TRACE("hwnd %p rect %s\n", hwnd, wine_dbgstr_rect(rect));
++
++    memset(info, 0, sizeof(*info));
++    info->bmiHeader.biSize        = sizeof(info->bmiHeader);
++    info->bmiHeader.biWidth       = width;
++    info->bmiHeader.biHeight      = -height; /* top-down */
++    info->bmiHeader.biPlanes      = 1;
++    info->bmiHeader.biBitCount    = 32;
++    info->bmiHeader.biSizeImage   = width * height * 4;
++    info->bmiHeader.biCompression = BI_RGB;
++
++    if ((window_surface = window_surface_create(sizeof(struct ios_window_surface),
++                                                &ios_window_surface_funcs, hwnd, rect, info, 0)))
++    {
++        struct ios_window_surface *surface = ios_window_surface_cast(window_surface);
++        pthread_mutexattr_t attr;
++
++        surface->width = width;
++        surface->height = height;
++        surface->stride = width * 4;
++        if (!(surface->host_bits = calloc(1, (size_t)surface->stride * height)))
++        {
++            window_surface_release(window_surface);
++            return NULL;
++        }
++        pthread_mutexattr_init(&attr);
++        pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
++        pthread_mutex_init(&surface->host_mutex, &attr);
++        pthread_mutexattr_destroy(&attr);
++
++        pthread_mutex_lock(&surface_list_mutex);
++        surface->id = next_surface_id++;
++        list_add_tail(&surface_list, &surface->entry);
++        pthread_mutex_unlock(&surface_list_mutex);
++
++        if (iosdrv_host && iosdrv_host->surface_added)
++        {
++            struct wineios_surface_info surface_info =
++            {
++                .id = surface->id,
++                .hwnd = (uint64_t)(UINT_PTR)hwnd,
++                .bits = surface->host_bits,
++                .width = surface->width,
++                .height = surface->height,
++                .stride = surface->stride,
++                .lock = ios_surface_lock,
++                .unlock = ios_surface_unlock,
++                .lock_ctx = surface,
++            };
++            iosdrv_host->surface_added(iosdrv_host->ctx, &surface_info);
++        }
++        if (iosdrv_dump_dir)
++            fprintf(stderr, "wineios: SURFACE_CREATED id=%llu hwnd=%p size=%dx%d\n",
++                    (unsigned long long)surface->id, hwnd, width, height);
++    }
++
++    return window_surface;
++}
++
++/***********************************************************************
++ * driver entry points
++ */
++
++BOOL IOSDRV_WindowPosChanging(HWND hwnd, UINT swp_flags, BOOL shaped, const struct window_rects *rects)
++{
++    struct ios_win_data *data = ios_win_data_get(hwnd);
++
++    TRACE("hwnd %p swp_flags %04x rects %s\n", hwnd, swp_flags, debugstr_window_rects(rects));
++
++    if (!data && !(data = ios_win_data_create(hwnd, rects))) return FALSE;
++
++    ios_win_data_release(data);
++
++    return TRUE;
++}
++
++BOOL IOSDRV_CreateWindowSurface(HWND hwnd, BOOL layered, const RECT *surface_rect,
++                                struct window_surface **surface)
++{
++    struct window_surface *previous;
++    struct ios_win_data *data;
++
++    TRACE("hwnd %p layered %u surface_rect %s\n", hwnd, layered, wine_dbgstr_rect(surface_rect));
++
++    if ((previous = *surface) && previous->funcs == &ios_window_surface_funcs) return TRUE;
++    if (!(data = ios_win_data_get(hwnd))) return TRUE;  /* use the default surface */
++    if (previous) window_surface_release(previous);
++
++    *surface = ios_window_surface_create(hwnd, surface_rect);
++    data->surface_id = *surface ? ios_window_surface_cast(*surface)->id : 0;
++
++    ios_win_data_release(data);
++    return TRUE;
++}
++
++void IOSDRV_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UINT swp_flags,
++                             const struct window_rects *new_rects, struct window_surface *surface)
++{
++    struct ios_win_data *data;
++    uint64_t surface_id;
++    BOOL visible;
++    RECT rect;
++
++    if (!(data = ios_win_data_get(hwnd))) return;
++
++    data->rects = *new_rects;
++    if (surface && surface->funcs == &ios_window_surface_funcs)
++        data->surface_id = ios_window_surface_cast(surface)->id;
++    surface_id = data->surface_id;
++    rect = new_rects->visible;
++    ios_win_data_release(data);
++
++    visible = (NtUserGetWindowLongW(hwnd, GWL_STYLE) & WS_VISIBLE) != 0;
++
++    TRACE("hwnd %p surface_id %llu rect %s visible %u\n", hwnd,
++          (unsigned long long)surface_id, wine_dbgstr_rect(&rect), visible);
++
++    if (surface_id && iosdrv_host && iosdrv_host->surface_placed)
++        iosdrv_host->surface_placed(iosdrv_host->ctx, surface_id, rect.left, rect.top,
++                                    rect.right - rect.left, rect.bottom - rect.top, visible);
++}
++
++void IOSDRV_DestroyWindow(HWND hwnd)
++{
++    struct ios_win_data *data;
++
++    TRACE("hwnd %p\n", hwnd);
++
++    if (!(data = ios_win_data_get(hwnd))) return;
++    rb_remove(&win_data_rb, &data->entry);
++    pthread_mutex_unlock(&win_data_mutex);
++    free(data);
++}
++
++LRESULT IOSDRV_DesktopWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
++{
++    return NtUserMessageCall(hwnd, msg, wp, lp, 0, NtUserDefWindowProc, FALSE);
++}
++
++void IOSDRV_SetWindowText(HWND hwnd, LPCWSTR text)
++{
++    if (iosdrv_host && iosdrv_host->window_title)
++        iosdrv_host->window_title(iosdrv_host->ctx, (uint64_t)(UINT_PTR)hwnd,
++                                  (const uint16_t *)text, wcslen(text));
++}
+diff --git a/dlls/wineios.drv/wineios_host.h b/dlls/wineios.drv/wineios_host.h
+new file mode 100644
+index 00000000..a7b834fd
+--- /dev/null
++++ b/dlls/wineios.drv/wineios_host.h
+@@ -0,0 +1,143 @@
++/*
++ * wineios.drv <-> host application bridge contract
++ *
++ * Copyright 2026 the Crossover-IOS project
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ */
++
++/*
++ * The contract between the in-process Wine display driver (wineios.drv,
++ * running on Wine threads) and the host application's presenter (UIKit/Metal,
++ * running on the app main thread). Everything lives in ONE process; the
++ * driver finds the host with dlsym(RTLD_DEFAULT, WINEIOS_HOST_ENTRY) at init.
++ * If the symbol is absent the driver runs headless (surfaces still exist,
++ * flushes are counted and optionally dumped — that is the CI mode).
++ *
++ * This header is intentionally self-contained plain C99 (no Wine, no UIKit
++ * types) because it is compiled on both sides: the Wine unixlib and the app's
++ * WineHost bridge keep an identical copy each (see
++ * CrossoverPad/Sources/WineHost/wineios_host.h; keep the two in sync — the
++ * abi_version handshake catches a mismatch at runtime).
++ *
++ * Threading rules (the whole design hangs on these):
++ *  - Every host callback here is invoked from a WINE thread. Callbacks must
++ *    not block on the app main thread and must not call UIKit directly;
++ *    they only mutate host-side registries/queues under host locks.
++ *  - The host reads surface pixels from its own threads at any time, but
++ *    only between surface_added and the return of surface_removed, and only
++ *    while holding the surface's lock (wineios_surface_info.lock/unlock).
++ *  - next_event blocks a dedicated Wine guest thread; the host's input
++ *    handlers (main thread) only enqueue and signal.
++ *  - The driver NEVER invokes a host callback while holding a surface's
++ *    pixel lock, so host callbacks may take host-side locks that the
++ *    host's readers hold around lock()/unlock() without deadlocking.
++ */
++
++#ifndef __WINEIOS_HOST_H
++#define __WINEIOS_HOST_H
++
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#define WINEIOS_HOST_ABI_VERSION 1
++
++/* The symbol the driver resolves in the host executable:
++ *   const struct wineios_host *wineios_host_get(void);
++ * Return NULL to decline (driver then runs headless). */
++#define WINEIOS_HOST_ENTRY "wineios_host_get"
++
++/* input events, host -> driver */
++enum wineios_event_type
++{
++    WINEIOS_EVENT_MOUSE_MOVE = 1,   /* x,y screen px */
++    WINEIOS_EVENT_MOUSE_BUTTON,     /* x,y screen px; button; down */
++    WINEIOS_EVENT_MOUSE_WHEEL,      /* x,y screen px; wheel = signed detents*120 */
++    WINEIOS_EVENT_KEY,              /* vk = Windows virtual-key code; down */
++    WINEIOS_EVENT_CHAR,             /* ch = UTF-16 code unit (injected as unicode key) */
++};
++
++enum wineios_mouse_button
++{
++    WINEIOS_BUTTON_LEFT = 0,
++    WINEIOS_BUTTON_RIGHT = 1,
++    WINEIOS_BUTTON_MIDDLE = 2,
++};
++
++struct wineios_event
++{
++    uint32_t type;        /* enum wineios_event_type */
++    uint64_t surface_id;  /* surface under the touch, 0 = foreground window */
++    int32_t  x, y;        /* screen pixels (Windows virtual-desktop coords) */
++    uint32_t button;      /* enum wineios_mouse_button */
++    int32_t  wheel;       /* wheel delta, multiples of 120 */
++    uint32_t vk;          /* Windows VK_* code */
++    uint32_t ch;          /* UTF-16 code unit */
++    uint32_t down;        /* 1 = press, 0 = release (buttons / keys) */
++};
++
++/* a top-level window's pixel surface, driver -> host */
++struct wineios_surface_info
++{
++    uint64_t id;          /* driver-assigned, unique for the process lifetime */
++    uint64_t hwnd;        /* Windows HWND value (opaque to the host; for logs) */
++    void    *bits;        /* BGRA8888, top-down, valid until surface_removed returns */
++    uint32_t width;       /* pixel size of the surface bitmap */
++    uint32_t height;
++    uint32_t stride;      /* bytes per row (width * 4) */
++    /* pixel lock: hold while reading bits; the driver holds it while writing */
++    void   (*lock)(void *lock_ctx);
++    void   (*unlock)(void *lock_ctx);
++    void    *lock_ctx;
++};
++
++struct wineios_host
++{
++    uint32_t abi_version;  /* must equal WINEIOS_HOST_ABI_VERSION */
++    void    *ctx;          /* passed back to every callback */
++
++    /* Screen size in PIXELS the Windows desktop should run at
++     * (UIScreen.nativeBounds). Return 0 to fall back to the driver default. */
++    int  (*screen_size)(void *ctx, uint32_t *width, uint32_t *height);
++
++    /* surface lifecycle (Wine threads; keep these quick, no UIKit) */
++    void (*surface_added)(void *ctx, const struct wineios_surface_info *info);
++    /* new position/visibility of a surface's window on the virtual desktop */
++    void (*surface_placed)(void *ctx, uint64_t id, int32_t x, int32_t y,
++                           int32_t width, int32_t height, int visible);
++    /* pixels changed inside the given surface-local rect (already written) */
++    void (*surface_updated)(void *ctx, uint64_t id, int32_t left, int32_t top,
++                            int32_t right, int32_t bottom);
++    /* after this returns the host must no longer touch bits/lock */
++    void (*surface_removed)(void *ctx, uint64_t id);
++
++    /* window title changed (UTF-16, not nul-terminated) */
++    void (*window_title)(void *ctx, uint64_t hwnd, const uint16_t *utf16, uint32_t len);
++
++    /* Blocking input dequeue, called from a dedicated Wine thread.
++     * Return 1 with *out filled, 0 on timeout, -1 to stop the input loop. */
++    int  (*next_event)(void *ctx, struct wineios_event *out, int32_t timeout_ms);
++};
++
++typedef const struct wineios_host *(*wineios_host_get_fn)(void);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* __WINEIOS_HOST_H */
+diff --git a/programs/explorer/desktop.c b/programs/explorer/desktop.c
+index ce70c5dd..0086e354 100644
+--- a/programs/explorer/desktop.c
++++ b/programs/explorer/desktop.c
+@@ -40,7 +40,10 @@ WINE_DEFAULT_DEBUG_CHANNEL(explorer);
+ #define DESKTOP_CLASS_ATOM ((LPCWSTR)MAKEINTATOM(32769))
+ #define DESKTOP_ALL_ACCESS 0x01ff
+ 
+-static const WCHAR default_driver[] = L"mac,x11,wayland";
++/* Crossover-IOS fork, patch 0007: "ios" appended as the last-resort default
++ * so the iOS runtime picks wineios.drv with no registry configuration; on
++ * desktop platforms one of the earlier drivers always loads first. */
++static const WCHAR default_driver[] = L"mac,x11,wayland,ios";
+ 
+ static BOOL using_root = TRUE;
+ 
