@@ -120,8 +120,11 @@ jobs:
             grep -B1 -A4 "Error [0-9]\|error:" build.log | tail -50
           fi
           # hard gate: the pieces the app bootstrap needs must exist as arm64
+          # (wineios = the display driver, both halves; explorer owns the desktop)
           for f in loader/wine dlls/ntdll/ntdll.so dlls/win32u/win32u.so server/wineserver \
-                   programs/cmd/aarch64-windows/cmd.exe programs/wineboot/aarch64-windows/wineboot.exe; do
+                   dlls/wineios.drv/wineios.so dlls/wineios.drv/aarch64-windows/wineios.drv \
+                   programs/cmd/aarch64-windows/cmd.exe programs/wineboot/aarch64-windows/wineboot.exe \
+                   programs/explorer/aarch64-windows/explorer.exe programs/notepad/aarch64-windows/notepad.exe; do
             test -f "$f" || { echo "::error::missing $f"; exit 1; }
           done
           for f in loader/wine dlls/ntdll/ntdll.so server/wineserver; do
@@ -147,9 +150,11 @@ jobs:
           RT=CrossoverPad/WineRuntime
           rm -rf "$RT"; mkdir -p "$RT/rt/loader" "$RT/rt/server" "$RT/prefix"
           # unix .so libs (dlls/<name>/<name>.so, incl. dlls/ntdll/ntdll.so) and
-          # the arm64-Windows PE DLLs (dlls/<name>/aarch64-windows/<name>.dll),
+          # the arm64-Windows PE modules — .dll plus .drv (wineios.drv, the
+          # display driver, is a .drv; a .dll-only glob would silently drop it),
           # copied preserving their build-tree paths.
-          ( cd ios-build && find dlls \( -name '*.so' -o -path '*/aarch64-windows/*.dll' \) -print0 \
+          ( cd ios-build && find dlls \( -name '*.so' -o -path '*/aarch64-windows/*.dll' \
+              -o -path '*/aarch64-windows/*.drv' \) -print0 \
               | tar -cf - --null -T - ) | ( cd "$RT/rt" && tar -xf - )
           # the console programs (cmd.exe, wineboot.exe, …) as arm64 PE.
           ( cd ios-build && find programs -path '*/aarch64-windows/*.exe' -print0 \
@@ -166,12 +171,15 @@ jobs:
             echo "PE dll:     $(find "$RT/rt/dlls" -path '*/aarch64-windows/*.dll' | wc -l)"
             echo "PE exe:     $(find "$RT/rt/programs" -path '*/aarch64-windows/*.exe' | wc -l)"
             echo "cmd.exe:    $([ -f "$RT/rt/programs/cmd/aarch64-windows/cmd.exe" ] && echo yes || echo no)"
+            echo "display:    $([ -f "$RT/rt/dlls/wineios.drv/wineios.so" ] && [ -f "$RT/rt/dlls/wineios.drv/aarch64-windows/wineios.drv" ] && echo wineios.drv || echo MISSING)"
             echo "nls:        $(ls "$RT/rt/nls"/*.nls 2>/dev/null | wc -l)"
             echo "prefix:     $([ -f "$RT/prefix/drive_c/windows/system32/kernel32.dll" ] && echo present || echo MISSING)"
           } | tee "$RT/MANIFEST.txt"
           # hard sanity gates
           test -f "$RT/rt/dlls/ntdll/ntdll.so" || { echo "::error::ntdll.so missing"; exit 1; }
           test -f "$RT/rt/programs/cmd/aarch64-windows/cmd.exe" || { echo "::error::cmd.exe missing"; exit 1; }
+          test -f "$RT/rt/dlls/wineios.drv/wineios.so" || { echo "::error::wineios.so (display driver unixlib) missing"; exit 1; }
+          test -f "$RT/rt/dlls/wineios.drv/aarch64-windows/wineios.drv" || { echo "::error::wineios.drv (display driver PE) missing"; exit 1; }
           test "$(find "$RT/rt/dlls" -path '*/aarch64-windows/*.dll' | wc -l)" -gt 100 || { echo "::error::PE set too small"; exit 1; }
           test -f "$RT/rt/nls/locale.nls" || { echo "::error::nls missing"; exit 1; }
           test -f "$RT/prefix/drive_c/windows/system32/kernel32.dll" || { echo "::error::prefix missing"; exit 1; }

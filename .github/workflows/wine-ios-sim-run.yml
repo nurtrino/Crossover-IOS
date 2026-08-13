@@ -175,7 +175,8 @@ jobs:
             exit 1
           fi
           # the pieces the run needs
-          for f in loader/wine dlls/ntdll/ntdll.so server/wineserver programs/cmd/x86_64-windows/cmd.exe; do
+          for f in loader/wine dlls/ntdll/ntdll.so server/wineserver dlls/wineios.drv/wineios.so \
+                   programs/cmd/x86_64-windows/cmd.exe; do
             if [ -f "$f" ]; then echo "OK  $f ($(file -b "$f" | cut -c1-40))"; else echo "MISSING $f"; fi
           done
           test -f loader/wine && test -f dlls/ntdll/ntdll.so || { echo "::error::core build incomplete"; tail -80 build.log; exit 1; }
@@ -300,6 +301,29 @@ jobs:
             echo "inproc=no" >> "$GITHUB_OUTPUT"
           fi
 
+          echo "=== GUI smoke: notepad.exe against wineios.drv (headless surface dump) ==="
+          # The display driver runs headless when no app presenter is present:
+          # it still creates window surfaces, and with WINEIOS_SURFACE_DUMP set
+          # it writes each surface as a BMP on every flush and logs a
+          # "wineios: FLUSH ... checksum=..." marker. That validates the whole
+          # driver path (selection -> display -> desktop -> surface -> pixels)
+          # without a screen. notepad never exits on its own; the alarm bounds it.
+          echo "--- driver build products ---"
+          ls -la "$BUILD"/dlls/wineios.drv/wineios.so "$BUILD"/dlls/wineios.drv/*-windows/wineios.drv 2>&1 || true
+          mkdir -p surfdump
+          run_bounded 150 -- xcrun simctl spawn "$UDID" /usr/bin/env WINEPREFIX="$WP" \
+            WINEDEBUG=+err,+iosdrv WINEIOS_SCREEN=1024x768 WINEIOS_SURFACE_DUMP="$PWD/surfdump" \
+            "$BUILD/loader/wine" notepad.exe >gui.log 2>&1 || true
+          echo "--- gui.log (tail 60) ---"; tail -60 gui.log || true
+          echo "--- surface dumps ---"; ls -la surfdump/ 2>/dev/null || true
+          if grep -q "wineios: FLUSH" gui.log && ls surfdump/*.bmp >/dev/null 2>&1; then
+            echo "::notice::GUI: notepad.exe flushed real pixels through wineios.drv (BMPs in artifacts)"
+            echo "gui=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::GUI smoke produced no surface flush — see gui.log for where it stopped"
+            echo "gui=no" >> "$GITHUB_OUTPUT"
+          fi
+
           echo "=== kernel/AMFI messages from the unified log (why SIGKILL) ==="
           log show --last 4m --style compact \
             --predicate 'eventMessage CONTAINS[c] "wine" OR process == "amfid" OR eventMessage CONTAINS[c] "CODE SIGNING" OR eventMessage CONTAINS[c] "pagezero"' \
@@ -322,11 +346,16 @@ jobs:
             sim-build/cfg.log
             boot.log
             run.log
+            gui.log
+            surfdump/
           if-no-files-found: ignore
 
       - name: Verdict
         run: |
-          echo "ran=${{ steps.run.outputs.ran }}"
+          echo "ran=${{ steps.run.outputs.ran }}  gui=${{ steps.run.outputs.gui }}"
+          if [ "${{ steps.run.outputs.gui }}" = "yes" ]; then
+            echo "GUI: notepad.exe drew pixels through wineios.drv (M2 driver path proven in the simulator)."
+          fi
           if [ "${{ steps.run.outputs.ran }}" = "yes" ]; then
             echo "Windows software executed in the iOS Simulator runtime."
           else

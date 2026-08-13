@@ -1,5 +1,24 @@
 # CrossoverPad — iOS Display Driver: Implementation Handoff
 
+> **STATUS (implemented — v1 vertical slice).** Patch
+> `native/patches/0007-ios-display-driver.patch` adds the driver as
+> `dlls/wineios.drv` (named for explorer's `wine<name>.drv` composition rule,
+> so its selection name is `ios`; the handoff's `winendrv` was a placeholder).
+> The §3 split was taken one step further: the Wine-side driver is **pure C
+> with no UIKit linkage at all** — presentation goes through a dlsym'd host
+> bridge (`wineios_host.h`) the app implements in
+> `CrossoverPad/Sources/WineHost/WineDisplayHost.c`, and the presenter is
+> `CrossoverPad/Sources/Views/GuestScreenView.swift` (CALayer/CGImage v0 blit,
+> §4.5's "prove pixels before Metal" cut). §4.1–4.7 are in: display device,
+> desktop via nulldrv, window surface with dirty-rect flush, placement,
+> touch→mouse and unicode keyboard via `NtUserSendHardwareInput` from a
+> dedicated Wine thread. Headless mode + `WINEIOS_SURFACE_DUMP` BMP dumps make
+> the driver CI-testable with no screen: `native/wineforge/iosdrv_gui_smoke.sh`
+> (Linux, validated) and the GUI smoke step in `wine-ios-sim-run.yml`
+> (simulator). See `native/patches/README.md` §0007 for the full ledger.
+> The rest of this document is the original design handoff, kept as the map
+> for M3+ (multiple windows, layered windows, GL/Vulkan).
+
 **Audience:** the engineer/agent building the graphics driver. You have the full
 codebase; this doc is the map, the constraints, and the plan — not a code dump.
 Read the referenced files directly.

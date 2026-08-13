@@ -177,14 +177,26 @@ Cross-build now proven in CI (`.github/workflows/wine-ios-probe.yml`):
       on-device testing runs against; the app reports the runtime tier
       truthfully instead of faking execution.
 Remaining for M2 (needs a device / the display driver):
-- [ ] A UIKit/Metal `win32u` display backend (replaces the disabled winemac
-      driver) — the piece that actually puts a window on screen for GUI guests
+- [x] A `win32u` display backend replacing the disabled winemac driver:
+      **`wineios.drv`** (patch 0007, `docs/DISPLAY-DRIVER.md`). Pure-C Wine
+      side + dlsym host bridge; the app owns all UIKit
+      (`WineDisplayHost.c` + `GuestScreenView.swift` CALayer presenter,
+      touch→mouse, unicode keyboard). Validated headless on Linux:
+      `native/wineforge/iosdrv_gui_smoke.sh` runs notepad.exe with no
+      display server and asserts the driver's surface flushes + BMP pixel
+      dumps; display metrics probe correct (SM_CXSCREEN = screen px — the
+      old M1 gate). Sim workflow gained the same GUI smoke.
 - [ ] On-device bring-up against `rt-alpha-1`: JIT/W^X probe, loader
       integration, 16 KB-page + TEB verification (needs real hardware)
 - [ ] 16 KB-page mmap/section-mapping verification on-device; TEB register plumbing
 - [ ] Dev-channel harness (TrollStore/jailbreak) for on-device iteration
-- [ ] Render Wine's display into a `CAMetalLayer` via a UIKit winedrv stub
-- [ ] **M2: notepad.exe on an iPad**
+- [ ] Metal presenter upgrade (CALayer/CGImage blit is the proven v0;
+      `CAMetalLayer` swap is mechanical behind the same bridge)
+- [ ] **M2: notepad.exe on an iPad** — needs the device round-trip; the
+      driver + presenter + input path is code-complete and CI-smoked
+- [ ] Known issue to chase (pre-existing, reproduces with the `null`
+      driver too): `CW_USEDEFAULT` windows get a bogus ~6.7Mpx rect on this
+      stack (see patches/README §0007)
 
 ## Phase 4 — x86 translation (WS-D) → M3
 - [ ] Box64 integrated for x86/x86-64 PE code (16 KB-page host support);
